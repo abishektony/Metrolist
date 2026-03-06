@@ -79,6 +79,7 @@ object YTPlayerUtils {
         playlistId: String? = null,
         audioQuality: AudioQuality,
         connectivityManager: ConnectivityManager,
+        preferVideo: Boolean = false,
     ): Result<PlaybackData> = runCatching {
         Timber.tag(logTag).d("Fetching player response for videoId: $videoId, playlistId: $playlistId")
         // Debug: Log ALL playback attempts
@@ -229,10 +230,11 @@ object YTPlayerUtils {
                         responseToUse,
                         audioQuality,
                         connectivityManager,
+                        preferVideo,
                     )
 
-                if (format == null) {
-                    Timber.tag(logTag).d("No suitable format found for client: ${if (clientIndex == -1) MAIN_CLIENT.clientName else STREAM_FALLBACK_CLIENTS[clientIndex].clientName}")
+                if (format == null || (preferVideo && format.width == null && clientIndex < STREAM_FALLBACK_CLIENTS.size - 1)) {
+                    Timber.tag(logTag).d("No suitable format (or no video when preferred) found for client: ${if (clientIndex == -1) MAIN_CLIENT.clientName else STREAM_FALLBACK_CLIENTS[clientIndex].clientName}")
                     continue
                 }
 
@@ -384,8 +386,29 @@ object YTPlayerUtils {
         playerResponse: PlayerResponse,
         audioQuality: AudioQuality,
         connectivityManager: ConnectivityManager,
+        preferVideo: Boolean = false,
     ): PlayerResponse.StreamingData.Format? {
-        Timber.tag(logTag).d("Finding format with audioQuality: $audioQuality, network metered: ${connectivityManager.isActiveNetworkMetered}")
+        Timber.tag(logTag).d("Finding format with audioQuality: $audioQuality, network metered: ${connectivityManager.isActiveNetworkMetered}, preferVideo: $preferVideo")
+
+        if (preferVideo) {
+            // First try to find a muxed format (audio + video) - usually itag 18 or 22
+            val muxedFormat = playerResponse.streamingData?.formats
+                ?.filter { it.width != null && (it.audioSampleRate != null || it.audioQuality != null) }
+                ?.maxByOrNull { it.width ?: 0 }
+
+            if (muxedFormat != null) {
+                Timber.tag(logTag).d("Selected muxed format: ${muxedFormat.mimeType}, resolution: ${muxedFormat.width}x${muxedFormat.height}")
+                return muxedFormat
+            }
+
+            // If we are strictly preferring video, we might want to return null here to force 
+            // fallback to other clients that might have muxed formats (like TVHTML5)
+            // But we should only do this if we are not already on the last client.
+            // Since we don't know the client here, we'll try to find any video-only format 
+            // as a last resort, but only if it's better than nothing.
+            // HOWEVER, returnning video-only here would break audio.
+            // So we skip and fall back to audio below if no muxed found in this client.
+        }
 
         val format = playerResponse.streamingData?.adaptiveFormats
             ?.filter { it.isAudio && it.isOriginal }

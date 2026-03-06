@@ -129,7 +129,7 @@ constructor(
                         MediaMetadata
                             .Builder()
                             .setIsPlayable(false)
-                            .setIsBrowsable(false)
+                            .setIsBrowsable(true)
                             .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
                             .build(),
                     ).build(),
@@ -150,6 +150,13 @@ constructor(
                 when (parentId) {
                     MusicService.ROOT ->
                         listOf(
+                            browsableMediaItem(
+                                MusicService.HOME,
+                                context.getString(R.string.home),
+                                null,
+                                drawableUri(R.drawable.home_filled),
+                                MediaMetadata.MEDIA_TYPE_FOLDER_MIXED,
+                            ),
                             browsableMediaItem(
                                 MusicService.SONG,
                                 context.getString(R.string.songs),
@@ -177,6 +184,31 @@ constructor(
                                 null,
                                 drawableUri(R.drawable.queue_music),
                                 MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS,
+                            ),
+                        )
+
+                    MusicService.HOME ->
+                        listOf(
+                            browsableMediaItem(
+                                MusicService.QUICK_PICKS,
+                                context.getString(R.string.quick_picks),
+                                null,
+                                drawableUri(R.drawable.trending_up),
+                                MediaMetadata.MEDIA_TYPE_PLAYLIST,
+                            ),
+                            browsableMediaItem(
+                                MusicService.MOST_PLAYED,
+                                context.getString(R.string.most_played_songs),
+                                null,
+                                drawableUri(R.drawable.favorite),
+                                MediaMetadata.MEDIA_TYPE_PLAYLIST,
+                            ),
+                            browsableMediaItem(
+                                MusicService.FORGOTTEN_FAVORITES,
+                                context.getString(R.string.forgotten_favorites),
+                                null,
+                                drawableUri(R.drawable.restore),
+                                MediaMetadata.MEDIA_TYPE_PLAYLIST,
                             ),
                         )
 
@@ -272,6 +304,15 @@ constructor(
                             )
                         }
                     }
+
+                    MusicService.QUICK_PICKS -> database.quickPicks().first()
+                        .map { it.toMediaItem(parentId) }
+
+                    MusicService.MOST_PLAYED -> database.mostPlayedSongs(0, limit = 50).first()
+                        .map { it.toMediaItem(parentId) }
+
+                    MusicService.FORGOTTEN_FAVORITES -> database.forgottenFavorites().first()
+                        .map { it.toMediaItem(parentId) }
 
                     else ->
                         when {
@@ -519,12 +560,20 @@ constructor(
                 ?: return@future defaultResult
 
             when (path.firstOrNull()) {
+                MusicService.QUICK_PICKS,
+                MusicService.MOST_PLAYED,
+                MusicService.FORGOTTEN_FAVORITES,
                 MusicService.SONG -> {
                     val songId = path.getOrNull(1) ?: return@future defaultResult
-                    val allSongs = database.songsByCreateDateAsc().first()
+                    val songs = when (path.first()) {
+                        MusicService.QUICK_PICKS -> database.quickPicks().first()
+                        MusicService.MOST_PLAYED -> database.mostPlayedSongs(0).first()
+                        MusicService.FORGOTTEN_FAVORITES -> database.forgottenFavorites().first()
+                        else -> database.songsByCreateDateAsc().first()
+                    }
                     MediaItemsWithStartPosition(
-                        allSongs.map { it.toMediaItem() },
-                        allSongs.indexOfFirst { it.id == songId }.takeIf { it != -1 } ?: 0,
+                        songs.map { it.toMediaItem() },
+                        songs.indexOfFirst { it.id == songId }.takeIf { it != -1 } ?: 0,
                         startPositionMs
                     )
                 }

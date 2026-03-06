@@ -59,6 +59,9 @@ import com.metrolist.music.ui.screens.settings.integrations.LastFMSettings
 import com.metrolist.music.ui.screens.settings.integrations.ListenTogetherSettings
 import com.metrolist.music.ui.screens.recognition.RecognitionScreen
 import com.metrolist.music.ui.screens.recognition.RecognitionHistoryScreen
+import com.metrolist.music.ui.screens.pearconnect.QrScannerScreen
+import com.metrolist.music.ui.component.PearConnectExpandedPlayer
+import com.metrolist.music.LocalPearConnectClient
 import com.metrolist.music.ui.screens.wrapped.WrappedScreen
 import com.metrolist.music.utils.rememberEnumPreference
 import com.metrolist.music.utils.rememberPreference
@@ -410,5 +413,19 @@ fun NavGraphBuilder.navigationBuilder(
 
     composable("recognition_history") {
         RecognitionHistoryScreen(navController)
+    }
+
+    composable("qr_scanner") {
+        QrScannerScreen(
+            onDismiss = { navController.popBackStack() }
+        )
+    }
+
+    composable("pear_connect_player") {
+        val pearConnectClient = LocalPearConnectClient.current
+        PearConnectExpandedPlayer(
+            pearConnectClient = pearConnectClient,
+            onDismiss = { navController.popBackStack() }
+        )
     }
 }

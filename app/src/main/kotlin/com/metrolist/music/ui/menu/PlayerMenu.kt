@@ -29,7 +29,10 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -150,6 +153,11 @@ fun PlayerMenu(
     val isListenTogetherGuest = listenTogetherRoleState?.value == com.metrolist.music.listentogether.RoomRole.GUEST
     val pendingSuggestions by listenTogetherManager?.pendingSuggestions?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
 
+    val pearConnectClient = com.metrolist.music.LocalPearConnectClient.current
+    val pearState by pearConnectClient?.state?.collectAsState() ?: remember { mutableStateOf(com.metrolist.music.pearconnect.PearConnectState.DISCONNECTED) }
+    val isPearConnected = pearState == com.metrolist.music.pearconnect.PearConnectState.CONNECTED
+    val desktopPlaybackState by pearConnectClient?.desktopPlaybackState?.collectAsState() ?: remember { mutableStateOf(null) }
+
     AddToPlaylistDialog(
         isVisible = showChoosePlaylistDialog,
         onGetSong = { playlist ->
@@ -224,7 +232,7 @@ fun PlayerMenu(
                 .padding(horizontal = 24.dp)
                 .padding(top = 24.dp, bottom = 6.dp),
         ) {
-            // Show Cast indicator when casting
+            // Show Cast or Pear indicator when active
             if (isCasting && castDeviceName != null) {
                 Row(
                     horizontalArrangement = Arrangement.Center,
@@ -246,13 +254,42 @@ fun PlayerMenu(
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
+            } else if (isPearConnected) {
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF00FF88))
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Controlling Pear Desktop",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
             
             VolumeSlider(
-                value = if (isCasting) castVolume else playerVolume.value,
+                value = if (isCasting) {
+                    castVolume
+                } else if (isPearConnected && desktopPlaybackState != null) {
+                    (desktopPlaybackState!!.volume.toFloat() / 100f).coerceIn(0f, 1f)
+                } else {
+                    playerVolume.value
+                },
                 onValueChange = { volume ->
                     if (isCasting) {
                         castHandler?.setVolume(volume)
+                    } else if (isPearConnected) {
+                        pearConnectClient?.setVolume(volume)
                     } else {
                         playerConnection.service.playerVolume.value = volume
                     }

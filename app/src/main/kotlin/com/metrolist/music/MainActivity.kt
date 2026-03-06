@@ -97,6 +97,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastAny
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -141,6 +142,8 @@ import com.metrolist.music.constants.NavigationBarAnimationSpec
 import com.metrolist.music.constants.NavigationBarHeight
 import com.metrolist.music.constants.PauseListenHistoryKey
 import com.metrolist.music.constants.PauseSearchHistoryKey
+import com.metrolist.music.constants.PearConnectMode
+import com.metrolist.music.constants.PearConnectModeKey
 import com.metrolist.music.constants.PureBlackKey
 import com.metrolist.music.constants.SYSTEM_DEFAULT
 import com.metrolist.music.constants.SelectedThemeColorKey
@@ -152,6 +155,8 @@ import com.metrolist.music.constants.UseNewMiniPlayerDesignKey
 import com.metrolist.music.db.MusicDatabase
 import com.metrolist.music.db.entities.SearchHistory
 import com.metrolist.music.extensions.toEnum
+import com.metrolist.music.LocalPearConnectClient
+import com.metrolist.music.pearconnect.PearConnectState
 import com.metrolist.music.models.toMediaMetadata
 import com.metrolist.music.playback.DownloadUtil
 import com.metrolist.music.playback.MusicService
@@ -165,6 +170,8 @@ import com.metrolist.music.ui.component.BottomSheetMenu
 import com.metrolist.music.ui.component.BottomSheetPage
 import com.metrolist.music.ui.component.LocalBottomSheetPageState
 import com.metrolist.music.ui.component.LocalMenuState
+import com.metrolist.music.ui.component.PearConnectDialog
+import com.metrolist.music.ui.component.PearConnectPlayerBar
 import com.metrolist.music.ui.component.rememberBottomSheetState
 import com.metrolist.music.ui.component.shimmer.ShimmerTheme
 import com.metrolist.music.ui.menu.YouTubeSongMenu
@@ -226,17 +233,23 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var listenTogetherManager: com.metrolist.music.listentogether.ListenTogetherManager
 
+    @Inject
+    lateinit var pearConnectClient: com.metrolist.music.pearconnect.PearConnectClient
+
     private lateinit var navController: NavHostController
     private var pendingIntent: Intent? = null
     private var latestVersionName by mutableStateOf(BuildConfig.VERSION_NAME)
 
     private var playerConnection by mutableStateOf<PlayerConnection?>(null)
+    private var currentPearConnectMode = PearConnectMode.LAPTOP_ONLY
+
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             if (service is MusicBinder) {
                 try {
                     playerConnection = PlayerConnection(this@MainActivity, service, database, lifecycleScope)
+                    setupPlayerConnectionIntercepts()
                     Timber.tag("MainActivity").d("PlayerConnection created successfully")
                     // Connect Listen Together manager to player
                     listenTogetherManager.setPlayerConnection(playerConnection)
@@ -247,11 +260,83 @@ class MainActivity : ComponentActivity() {
                         delay(500)
                         try {
                             playerConnection = PlayerConnection(this@MainActivity, service, database, lifecycleScope)
+                            setupPlayerConnectionIntercepts()
                             listenTogetherManager.setPlayerConnection(playerConnection)
                         } catch (e2: Exception) {
                             Timber.tag("MainActivity").e(e2, "Failed to create PlayerConnection on retry")
                         }
                     }
+                }
+            }
+        }
+
+        private fun setupPlayerConnectionIntercepts() {
+            playerConnection?.onPlaybackIntercepted = { type ->
+                val state = pearConnectClient.state.value
+                Timber.d("PearConnect: onPlaybackIntercepted type=$type state=$state mode=$currentPearConnectMode")
+                
+                if (state == com.metrolist.music.pearconnect.PearConnectState.CONNECTED) {
+                    val mode = currentPearConnectMode
+                    
+                    if (mode == PearConnectMode.PHONE_ONLY) {
+                        false // Don't intercept, play on phone only
+                    } else {
+                        // mode is LAPTOP_ONLY or BOTH
+                        when {
+                            type == "PLAY" -> pearConnectClient.play()
+                            type == "PAUSE" -> pearConnectClient.pause()
+                            type == "NEXT" -> pearConnectClient.next()
+                            type == "PREVIOUS" -> pearConnectClient.previous()
+                            type.startsWith("SEEK:") -> {
+                                val pos = type.substringAfter("SEEK:").toLongOrNull()
+                                if (pos != null) {
+                                    Timber.d("PearConnect: Seeking desktop to ${pos / 1000L}s")
+                                    pearConnectClient.seekTo(pos / 1000L)
+                                }
+                            }
+                        }
+                        
+                        // If BOTH, return false so it also plays on phone. If LAPTOP_ONLY, return true to intercept.
+                        mode == PearConnectMode.LAPTOP_ONLY
+                    }
+                } else false
+            }
+
+            playerConnection?.onPlayQueueIntercepted = { queue ->
+                val state = pearConnectClient.state.value
+                Timber.d("PearConnect: onPlayQueueIntercepted state=$state mode=$currentPearConnectMode")
+                
+                if (state == com.metrolist.music.pearconnect.PearConnectState.CONNECTED) {
+                    val mode = currentPearConnectMode
+                    if (mode != PearConnectMode.PHONE_ONLY) {
+                        val videoId = queue.preloadItem?.id 
+                        if (videoId != null) {
+                            Timber.i("PearConnect: Intercepted queue play, sending videoId=$videoId to desktop")
+                            pearConnectClient.playVideoOnDesktop(videoId)
+                        } else {
+                            Timber.d("PearConnect: No preloadItem, fetching initial status to find videoId")
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                try {
+                                    val status = queue.getInitialStatus()
+                                    val id = status.items.firstOrNull()?.mediaId
+                                    if (id != null) {
+                                        Timber.i("PearConnect: Found videoId=$id from initial status, sending to desktop")
+                                        pearConnectClient.playVideoOnDesktop(id)
+                                    } else {
+                                        Timber.w("PearConnect: No items found in queue status")
+                                    }
+                                } catch(e: Exception) {
+                                    Timber.tag("MainActivity").e(e, "Failed to extract playId for Pear Connect")
+                                }
+                            }
+                        }
+                    }
+                    
+                    // If BOTH, return false so it also plays on phone. If LAPTOP_ONLY, return true to intercept.
+                    mode == PearConnectMode.LAPTOP_ONLY
+                } else {
+                    Timber.d("PearConnect: Not connected, skipping interception")
+                    false
                 }
             }
         }
@@ -271,6 +356,11 @@ class MainActivity : ComponentActivity() {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1000)
             }
+        }
+
+        // Probe/restore PearConnect socket every time the app comes to foreground
+        if (::pearConnectClient.isInitialized) {
+            pearConnectClient.reconnectIfNeeded()
         }
 
         // On Android 12+, we can't start foreground services from background
@@ -316,6 +406,19 @@ class MainActivity : ComponentActivity() {
         window.decorView.layoutDirection = View.LAYOUT_DIRECTION_LTR
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
+        lifecycleScope.launch {
+            dataStore.data.map { it[PearConnectModeKey] ?: PearConnectMode.LAPTOP_ONLY.name }
+                .distinctUntilChanged()
+                .collect { modeStr ->
+                    currentPearConnectMode = try {
+                        PearConnectMode.valueOf(modeStr)
+                    } catch (e: Exception) {
+                        PearConnectMode.LAPTOP_ONLY
+                    }
+                    Timber.tag("MainActivity").d("PearConnectMode updated: $currentPearConnectMode")
+                }
+        }
+
         // Initialize Listen Together manager
         listenTogetherManager.initialize()
 
@@ -344,14 +447,18 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            MetrolistApp(
-                latestVersionName = latestVersionName,
-                onLatestVersionNameChange = { latestVersionName = it },
-                playerConnection = playerConnection,
-                database = database,
-                downloadUtil = downloadUtil,
-                syncUtils = syncUtils,
-            )
+            CompositionLocalProvider(
+                LocalPearConnectClient provides pearConnectClient
+            ) {
+                MetrolistApp(
+                    latestVersionName = latestVersionName,
+                    onLatestVersionNameChange = { latestVersionName = it },
+                    playerConnection = playerConnection,
+                    database = database,
+                    downloadUtil = downloadUtil,
+                    syncUtils = syncUtils,
+                )
+            }
         }
     }
 
@@ -788,6 +895,38 @@ class MainActivity : ComponentActivity() {
 
                 val baseBg = if (pureBlack) Color.Black else MaterialTheme.colorScheme.surfaceContainer
 
+                val pearConnectState by (pearConnectClient?.state ?: kotlinx.coroutines.flow.MutableStateFlow(com.metrolist.music.pearconnect.PearConnectState.DISCONNECTED)).collectAsState()
+                val desktopPlaybackState by (pearConnectClient?.desktopPlaybackState ?: kotlinx.coroutines.flow.MutableStateFlow(null)).collectAsState()
+                var showPearConnectDialog by remember { mutableStateOf(false) }
+                var pearConnectPin by remember { mutableStateOf("") }
+                val isPearConnected = pearConnectState == com.metrolist.music.pearconnect.PearConnectState.CONNECTED
+
+                // When Pear Connect connects: pause local player — audio is on the desktop.
+                // When it disconnects: hand off back to local player at the exact song + position.
+                val wasConnected = remember { mutableStateOf(false) }
+                LaunchedEffect(isPearConnected) {
+                    if (isPearConnected) {
+                        wasConnected.value = true
+                    } else if (wasConnected.value) {
+                        wasConnected.value = false
+                        // Handoff back to local: load the last desktop song at its position
+                        val lastState = desktopPlaybackState
+                        val videoId = lastState?.trackInfo?.videoId?.takeIf { it.isNotBlank() }
+                        if (videoId != null && playerConnection != null) {
+                            val positionMs = ((lastState.currentTime) * 1000).toLong()
+                            playerConnection?.playQueue(
+                                com.metrolist.music.playback.queues.YouTubeQueue(
+                                    com.metrolist.innertube.models.WatchEndpoint(videoId = videoId)
+                                )
+                            )
+                            // Wait for player to load then seek to the right position
+                            kotlinx.coroutines.delay(800)
+                            playerConnection?.seekTo(positionMs)
+                            playerConnection?.play()
+                        }
+                    }
+                }
+
                 CompositionLocalProvider(
                     LocalDatabase provides database,
                     LocalContentColor provides if (pureBlack) Color.White else contentColorFor(MaterialTheme.colorScheme.surface),
@@ -797,12 +936,26 @@ class MainActivity : ComponentActivity() {
                     LocalShimmerTheme provides ShimmerTheme,
                     LocalSyncUtils provides syncUtils,
                     LocalListenTogetherManager provides listenTogetherManager,
+                    LocalPearConnectClient provides pearConnectClient,
                     LocalChangelogState provides showChangelog,
                 ) {
 
                     if (showChangelog.value) {
                         ChangelogScreen(onDismiss = { showChangelog.value = false })
                     }
+
+                    PearConnectDialog(
+                        pearConnectClient = pearConnectClient,
+                        pearConnectState = pearConnectState,
+                        showPearConnectDialog = showPearConnectDialog,
+                        onDismiss = { showPearConnectDialog = false },
+                        pearConnectPin = pearConnectPin,
+                        onPinChange = { pearConnectPin = it },
+                        onNavigateToQrScanner = {
+                            showPearConnectDialog = false
+                            navController.navigate("qr_scanner")
+                        }
+                    )
 
                     Scaffold(
                         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -842,6 +995,21 @@ class MainActivity : ComponentActivity() {
                                                         contentDescription = stringResource(R.string.together)
                                                     )
                                                 }
+                                            }
+                                            
+                                            val mode by rememberEnumPreference(PearConnectModeKey, defaultValue = com.metrolist.music.constants.PearConnectMode.LAPTOP_ONLY)
+                                            LaunchedEffect(mode) {
+                                                Timber.d("PearConnect: Syncing mode to intercepted state: $mode")
+                                                currentPearConnectMode = mode
+                                            }
+
+                                            val isPearConnected = pearConnectState == com.metrolist.music.pearconnect.PearConnectState.CONNECTED
+                                            IconButton(onClick = { showPearConnectDialog = true }) {
+                                                Icon(
+                                                    painter = painterResource(R.drawable.cast),
+                                                    contentDescription = "Pear Connect",
+                                                    tint = if (isPearConnected) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                                                )
                                             }
                                             IconButton(onClick = { showAccountDialog = true }) {
                                                 BadgedBox(badge = {
@@ -1286,6 +1454,25 @@ class MainActivity : ComponentActivity() {
             window.navigationBarColor = (if (isDark) Color.Transparent else Color.Black.copy(alpha = 0.2f)).toArgb()
         }
     }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (pearConnectClient.state.value == com.metrolist.music.pearconnect.PearConnectState.CONNECTED) {
+            val mode = currentPearConnectMode
+            if (mode != PearConnectMode.PHONE_ONLY) {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_VOLUME_UP -> {
+                        pearConnectClient.adjustVolume(5)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                        pearConnectClient.adjustVolume(-5)
+                        return true
+                    }
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
 }
 
 val LocalDatabase = staticCompositionLocalOf<MusicDatabase> { error("No database provided") }
@@ -1294,5 +1481,6 @@ val LocalPlayerAwareWindowInsets = compositionLocalOf<WindowInsets> { error("No 
 val LocalDownloadUtil = staticCompositionLocalOf<DownloadUtil> { error("No DownloadUtil provided") }
 val LocalSyncUtils = staticCompositionLocalOf<SyncUtils> { error("No SyncUtils provided") }
 val LocalListenTogetherManager = staticCompositionLocalOf<com.metrolist.music.listentogether.ListenTogetherManager?> { null }
+val LocalPearConnectClient = staticCompositionLocalOf<com.metrolist.music.pearconnect.PearConnectClient?> { null }
 val LocalChangelogState = staticCompositionLocalOf<MutableState<Boolean>> { error("No LocalChangelogState provided") }
 val LocalIsPlayerExpanded = compositionLocalOf { false }

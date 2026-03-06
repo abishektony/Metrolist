@@ -155,6 +155,13 @@ val ListenTogetherRoomCodeKey = stringPreferencesKey("listenTogetherRoomCode")
 val ListenTogetherUserIdKey = stringPreferencesKey("listenTogetherUserId")
 val ListenTogetherIsHostKey = booleanPreferencesKey("listenTogetherIsHost")
 val ListenTogetherSessionTimestampKey = longPreferencesKey("listenTogetherSessionTimestamp")
+val PearConnectModeKey = stringPreferencesKey("pearConnectMode")
+
+enum class PearConnectMode {
+    LAPTOP_ONLY,
+    PHONE_ONLY,
+    BOTH
+}
 
 val LastFMSessionKey = stringPreferencesKey("lastfmSession")
 val LastFMUsernameKey = stringPreferencesKey("lastfmUsername")

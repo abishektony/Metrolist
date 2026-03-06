@@ -223,9 +223,9 @@ class MessageCodec(
                     action = pb.action,
                     trackId = pb.trackId.takeIf { it.isNotEmpty() },
                     position = pb.position.takeIf { it > 0 },
-                    trackInfo = pb.trackInfo?.let { protoToTrackInfo(it) },
+                    trackInfo = if (pb.hasTrackInfo()) protoToTrackInfo(pb.trackInfo) else null,
                     insertNext = pb.insertNext.takeIf { it },
-                    queue = pb.queueList?.map { protoToTrackInfo(it) },
+                    queue = pb.queueList.map { protoToTrackInfo(it) },
                     queueTitle = pb.queueTitle.takeIf { it.isNotEmpty() },
                     volume = pb.volume.takeIf { it > 0 },
                     serverTime = pb.serverTime.takeIf { it > 0 }
@@ -254,11 +254,11 @@ class MessageCodec(
             MessageTypes.SYNC_STATE -> {
                 val pb = Listentogether.SyncStatePayload.parseFrom(payloadBytes)
                 SyncStatePayload(
-                    currentTrack = pb.currentTrack?.let { protoToTrackInfo(it) },
+                    currentTrack = if (pb.hasCurrentTrack()) protoToTrackInfo(pb.currentTrack) else null,
                     isPlaying = pb.isPlaying,
                     position = pb.position,
                     lastUpdate = pb.lastUpdate,
-                    queue = pb.queueList?.map { protoToTrackInfo(it) },
+                    queue = pb.queueList.map { protoToTrackInfo(it) },
                     volume = pb.volume.takeIf { it > 0 }
                 )
             }
@@ -285,14 +285,14 @@ class MessageCodec(
                     pb.suggestionId,
                     pb.fromUserId,
                     pb.fromUsername,
-                    protoToTrackInfo(pb.trackInfo)
+                    if (pb.hasTrackInfo()) protoToTrackInfo(pb.trackInfo) else TrackInfo("", "", "", duration = 0L)
                 )
             }
             MessageTypes.SUGGESTION_APPROVED -> {
                 val pb = Listentogether.SuggestionApprovedPayload.parseFrom(payloadBytes)
                 SuggestionApprovedPayload(
                     pb.suggestionId,
-                    protoToTrackInfo(pb.trackInfo)
+                    if (pb.hasTrackInfo()) protoToTrackInfo(pb.trackInfo) else TrackInfo("", "", "", duration = 0L)
                 )
             }
             MessageTypes.SUGGESTION_REJECTED -> {
@@ -343,7 +343,7 @@ class MessageCodec(
             roomCode = proto.roomCode,
             hostId = proto.hostId,
             users = proto.usersList.map { protoToUserInfo(it) },
-            currentTrack = proto.currentTrack?.let { protoToTrackInfo(it) },
+            currentTrack = if (proto.hasCurrentTrack()) protoToTrackInfo(proto.currentTrack) else null,
             isPlaying = proto.isPlaying,
             position = proto.position,
             lastUpdate = proto.lastUpdate,

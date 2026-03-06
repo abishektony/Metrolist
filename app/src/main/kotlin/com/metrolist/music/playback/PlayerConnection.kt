@@ -179,6 +179,14 @@ class PlayerConnection(
     var onSkipPrevious: (() -> Unit)? = null
     var onSkipNext: (() -> Unit)? = null
 
+    /**
+     * Called when a playback action is attempted while PearConnect is active.
+     * Return true to swallow the local action (it was routed to the desktop).
+     * Return false (or null callback) to proceed with local playback.
+     */
+    var onPlaybackIntercepted: ((type: String) -> Boolean)? = null
+    var onPlayQueueIntercepted: ((queue: Queue) -> Boolean)? = null
+
     private var attachedPlayer: Player? = null
 
     init {
@@ -222,6 +230,7 @@ class PlayerConnection(
     }
 
     fun playQueue(queue: Queue) {
+        if (onPlayQueueIntercepted?.invoke(queue) == true) return
         if (!playerReadinessFlow.value) {
             Timber.tag(TAG).w("playQueue called before player ready; delegating to service")
         }
@@ -310,6 +319,10 @@ class PlayerConnection(
      * Toggle play/pause - handles Cast when active
      */
     fun togglePlayPause() {
+        if (shouldBlockPlaybackChanges?.invoke() == true && !allowInternalSync) return
+        val isCurrentlyPlaying = playWhenReady.value
+        val desktopAction = if (isCurrentlyPlaying) "PAUSE" else "PLAY"
+        if (onPlaybackIntercepted?.invoke(desktopAction) == true) return
         try {
             val castHandler = service.castConnectionHandler
             if (castHandler?.isCasting?.value == true) {
@@ -329,6 +342,8 @@ class PlayerConnection(
      * Start playback - handles Cast when active
      */
     fun play() {
+        if (shouldBlockPlaybackChanges?.invoke() == true && !allowInternalSync) return
+        if (onPlaybackIntercepted?.invoke("PLAY") == true) return
         try {
             val castHandler = service.castConnectionHandler
             if (castHandler?.isCasting?.value == true) {
@@ -347,6 +362,8 @@ class PlayerConnection(
      * Pause playback - handles Cast when active
      */
     fun pause() {
+        if (shouldBlockPlaybackChanges?.invoke() == true && !allowInternalSync) return
+        if (onPlaybackIntercepted?.invoke("PAUSE") == true) return
         try {
             val castHandler = service.castConnectionHandler
             if (castHandler?.isCasting?.value == true) {
@@ -363,6 +380,8 @@ class PlayerConnection(
      * Seek to position - handles Cast when active
      */
     fun seekTo(position: Long) {
+        if (shouldBlockPlaybackChanges?.invoke() == true && !allowInternalSync) return
+        if (onPlaybackIntercepted?.invoke("SEEK:$position") == true) return
         try {
             val castHandler = service.castConnectionHandler
             if (castHandler?.isCasting?.value == true) {
@@ -376,6 +395,8 @@ class PlayerConnection(
     }
 
     fun seekToNext() {
+        if (shouldBlockPlaybackChanges?.invoke() == true && !allowInternalSync) return
+        if (onPlaybackIntercepted?.invoke("NEXT") == true) return
         try {
             // When casting, use Cast skip instead of local player
             val castHandler = service.castConnectionHandler
@@ -397,6 +418,8 @@ class PlayerConnection(
     var onRestartSong: (() -> Unit)? = null
 
     fun seekToPrevious() {
+        if (shouldBlockPlaybackChanges?.invoke() == true && !allowInternalSync) return
+        if (onPlaybackIntercepted?.invoke("PREVIOUS") == true) return
         try {
             // When casting, use Cast skip instead of local player
             val castHandler = service.castConnectionHandler

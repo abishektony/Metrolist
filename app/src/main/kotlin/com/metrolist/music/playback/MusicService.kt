@@ -132,6 +132,8 @@ import com.metrolist.music.constants.PreventDuplicateTracksInQueueKey
 import com.metrolist.music.constants.SimilarContent
 import com.metrolist.music.constants.SkipSilenceInstantKey
 import com.metrolist.music.constants.SkipSilenceKey
+import com.metrolist.music.constants.PearConnectMode
+import com.metrolist.music.constants.PearConnectModeKey
 import com.metrolist.music.db.MusicDatabase
 import com.metrolist.music.db.entities.Event
 import com.metrolist.music.db.entities.FormatEntity
@@ -242,6 +244,9 @@ class MusicService :
     @Inject
     lateinit var listenTogetherManager: com.metrolist.music.listentogether.ListenTogetherManager
 
+    @Inject
+    lateinit var pearConnectClient: com.metrolist.music.pearconnect.PearConnectClient
+
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
     private var lastAudioFocusState = AudioManager.AUDIOFOCUS_NONE
@@ -258,7 +263,7 @@ class MusicService :
 
     private val secondaryPlayerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
-            Timber.tag(TAG).e(error, "Secondary player error")
+            Timber.tag(SERVICE_TAG).e(error, "Secondary player error")
             secondaryPlayer?.stop()
             secondaryPlayer?.clearMediaItems()
             secondaryPlayer = null
@@ -277,6 +282,7 @@ class MusicService :
     private lateinit var connectivityManager: ConnectivityManager
     lateinit var connectivityObserver: NetworkConnectivityObserver
     val waitingForNetworkConnection = MutableStateFlow(false)
+    val immersiveModeEnabled = MutableStateFlow(false)
     private val isNetworkConnected = MutableStateFlow(false)
 
     private lateinit var audioQuality: com.metrolist.music.constants.AudioQuality
@@ -324,6 +330,27 @@ class MusicService :
     private fun applyEffectiveVolume() {
         if (!::player.isInitialized || isCrossfading) return
         player.volume = calculateEffectiveVolume()
+    }
+
+    fun setImmersiveMode(enabled: Boolean) {
+        if (immersiveModeEnabled.value != enabled) {
+            immersiveModeEnabled.value = enabled
+            
+            // Toggle on desktop if connected
+            if (pearConnectClient.state.value == com.metrolist.music.pearconnect.PearConnectState.CONNECTED) {
+                pearConnectClient.toggleImmersive()
+            }
+
+            // Only force re-fetch if we're currently playing something locally
+            player.currentMediaItem?.mediaId?.let { mediaId ->
+                // Mark for bypass so it gets a fresh YT stream (with video if enabled)
+                bypassCacheForQualityChange.add(mediaId)
+                // Seek locally to force ExoPlayer's ResolvingDataSource to re-trigger
+                val pos = player.currentPosition
+                player.seekTo(player.currentMediaItemIndex, pos)
+                player.prepare()
+            }
+        }
     }
 
 
@@ -484,9 +511,9 @@ class MusicService :
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 e is ForegroundServiceStartNotAllowedException
             ) {
-                Timber.tag(TAG).w("Foreground service start not allowed (likely app in background)")
+                Timber.tag(SERVICE_TAG).w("Foreground service start not allowed (likely app in background)")
             } else {
-                Timber.tag(TAG).e(e, "Failed to create foreground notification")
+                Timber.tag(SERVICE_TAG).e(e, "Failed to create foreground notification")
                 reportException(e)
             }
         }
@@ -511,7 +538,7 @@ class MusicService :
 
         // Mark player as initialized after successful creation
         playerInitialized.value = true
-        Timber.tag(TAG).d("Player successfully initialized")
+        Timber.tag(SERVICE_TAG).d("Player successfully initialized")
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         setupAudioFocusRequest()
@@ -521,9 +548,59 @@ class MusicService :
             toggleStartRadio = ::toggleStartRadio
             toggleLibrary = ::toggleLibrary
         }
+
+        val sessionPlayer = object : androidx.media3.common.ForwardingPlayer(player) {
+            private fun isPearConnected() = pearConnectClient.state.value == com.metrolist.music.pearconnect.PearConnectState.CONNECTED
+            private fun isGuest() = listenTogetherManager.role.value == com.metrolist.music.listentogether.RoomRole.GUEST
+
+            override fun play() {
+                if (isGuest()) return
+                if (isPearConnected()) pearConnectClient.play()
+                super.play()
+            }
+
+            override fun pause() {
+                if (isGuest()) return
+                if (isPearConnected()) pearConnectClient.pause()
+                super.pause()
+            }
+
+            override fun seekToNext() {
+                if (isGuest()) return
+                if (isPearConnected()) pearConnectClient.next()
+                super.seekToNext()
+            }
+
+            override fun seekToPrevious() {
+                if (isGuest()) return
+                if (isPearConnected()) pearConnectClient.previous()
+                super.seekToPrevious()
+            }
+
+            override fun seekTo(positionMs: Long) {
+                if (isGuest()) return
+                if (isPearConnected()) {
+                    pearConnectClient.seekTo(positionMs / 1000L)
+                    super.seekTo(positionMs)
+                } else {
+                    super.seekTo(positionMs)
+                }
+            }
+
+            override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
+                if (isGuest()) return
+                if (isPearConnected()) {
+                    pearConnectClient.seekTo(positionMs / 1000L)
+                    super.seekTo(mediaItemIndex, positionMs)
+                } else {
+                    super.seekTo(mediaItemIndex, positionMs)
+                }
+            }
+        }
+
         mediaSession =
             MediaLibrarySession
-                .Builder(this, player, mediaLibrarySessionCallback)
+                .Builder(this, sessionPlayer, mediaLibrarySessionCallback)
                 .setSessionActivity(
                     PendingIntent.getActivity(
                         this,
@@ -558,6 +635,67 @@ class MusicService :
 
         audioQuality = dataStore.get(AudioQualityKey).toEnum(com.metrolist.music.constants.AudioQuality.AUTO)
         playerVolume = MutableStateFlow(dataStore.get(PlayerVolumeKey, 1f).coerceIn(0f, 1f))
+
+        scope.launch {
+            kotlinx.coroutines.flow.combine(
+                pearConnectClient.state,
+                pearConnectClient.desktopPlaybackState,
+                dataStore.data.map { it[PearConnectModeKey] ?: PearConnectMode.LAPTOP_ONLY.name }
+                    .distinctUntilChanged()
+            ) { state, playbackState, mode ->
+                Triple(state, playbackState, mode)
+            }.collect { (state, playbackState, mode) ->
+                if (state == com.metrolist.music.pearconnect.PearConnectState.CONNECTED) {
+                    when (mode) {
+                        PearConnectMode.LAPTOP_ONLY.name -> {
+                            if (!isMuted.value) setMuted(true)
+                        }
+                        PearConnectMode.PHONE_ONLY.name, PearConnectMode.BOTH.name -> {
+                            if (isMuted.value) setMuted(false)
+                        }
+                    }
+                } else {
+                    if (isMuted.value && state == com.metrolist.music.pearconnect.PearConnectState.DISCONNECTED) {
+                        setMuted(false)
+                    }
+                }
+
+                if (state == com.metrolist.music.pearconnect.PearConnectState.CONNECTED && playbackState != null) {
+                if (playbackState != null && playbackState.trackInfo != null) {
+                    val track = playbackState.trackInfo
+                    val currentId = player.currentMediaItem?.mediaId
+                    if (currentId != track.videoId) {
+                        val thumb = track.thumbnail?.takeUnless { it.isBlank() } ?: "https://i.ytimg.com/vi/${track.videoId}/maxresdefault.jpg"
+                        val metadata = com.metrolist.music.models.MediaMetadata(
+                            id = track.videoId,
+                            title = track.title,
+                            artists = listOf(com.metrolist.music.models.MediaMetadata.Artist(name = track.artist, id = "")),
+                            duration = playbackState.duration.toInt(),
+                            thumbnailUrl = thumb,
+                            album = com.metrolist.music.models.MediaMetadata.Album(id = "", title = track.album ?: "Unknown")
+                        )
+                        player.stop()
+                        player.setMediaItem(metadata.toMediaItem())
+                        player.prepare()
+                        player.play()
+                    }
+                    
+                    if (player.playbackState == Player.STATE_READY) {
+                        if (playbackState.isPlaying && !player.isPlaying) {
+                            player.play()
+                        } else if (!playbackState.isPlaying && player.isPlaying) {
+                            player.pause()
+                        }
+                        
+                        val desktopPos = (playbackState.currentTime * 1000).toLong()
+                        if (kotlin.math.abs(player.currentPosition - desktopPos) > 3000) {
+                            player.seekTo(desktopPos)
+                        }
+                    }
+                }
+            }
+        }
+    }
 
         // Initialize Google Cast
         initializeCast()
@@ -888,11 +1026,11 @@ class MusicService :
                             }
                         }
                     }.onFailure { error ->
-                        Timber.tag(TAG).w(error, "Failed to restore persisted queue, clearing data")
+                        Timber.tag(SERVICE_TAG).w(error, "Failed to restore persisted queue, clearing data")
                         clearPersistedQueueFiles()
                     }
                 }.onFailure { error ->
-                    Timber.tag(TAG).w(error, "Failed to read persisted queue, clearing data")
+                    Timber.tag(SERVICE_TAG).w(error, "Failed to read persisted queue, clearing data")
                     clearPersistedQueueFiles()
                 }
             }
@@ -909,11 +1047,11 @@ class MusicService :
                     runCatching {
                         automixItems.value = queue.items.map { it.toMediaItem() }
                     }.onFailure { error ->
-                        Timber.tag(TAG).w(error, "Failed to restore automix queue, clearing data")
+                        Timber.tag(SERVICE_TAG).w(error, "Failed to restore automix queue, clearing data")
                         clearPersistedQueueFiles()
                     }
                 }.onFailure { error ->
-                    Timber.tag(TAG).w(error, "Failed to read automix queue, clearing data")
+                    Timber.tag(SERVICE_TAG).w(error, "Failed to read automix queue, clearing data")
                     clearPersistedQueueFiles()
                 }
             }
@@ -942,7 +1080,7 @@ class MusicService :
                         }
                     }
                 }.onFailure { error ->
-                    Timber.tag(TAG).w(error, "Failed to read player state, clearing data")
+                    Timber.tag(SERVICE_TAG).w(error, "Failed to read player state, clearing data")
                     clearPersistedQueueFiles()
                 }
             }
@@ -1139,7 +1277,7 @@ class MusicService :
 
         // Check if we've exceeded max retry attempts
         if (retryCount >= MAX_RETRY_COUNT) {
-            Timber.tag(TAG).w("Max retry count ($MAX_RETRY_COUNT) reached, stopping playback")
+            Timber.tag(SERVICE_TAG).w("Max retry count ($MAX_RETRY_COUNT) reached, stopping playback")
             stopOnError()
             retryCount = 0
             return
@@ -1152,7 +1290,7 @@ class MusicService :
         retryJob = scope.launch {
             // Exponential backoff: 3s, 6s, 12s, 24s... max 30s
             val delayMs = minOf(3000L * (1 shl retryCount), 30000L)
-            Timber.tag(TAG).d("Waiting ${delayMs}ms before retry attempt ${retryCount + 1}/$MAX_RETRY_COUNT")
+            Timber.tag(SERVICE_TAG).d("Waiting ${delayMs}ms before retry attempt ${retryCount + 1}/$MAX_RETRY_COUNT")
             delay(delayMs)
 
             if (isNetworkConnected.value && waitingForNetworkConnection.value) {
@@ -1170,7 +1308,7 @@ class MusicService :
             // After 3+ failed retries, try to refresh the stream URL by seeking to current position
             // This forces ExoPlayer to re-resolve the data source and get a fresh URL
             if (retryCount > 3) {
-                Timber.tag(TAG).d("Retry count > 3, attempting to refresh stream URL")
+                Timber.tag(SERVICE_TAG).d("Retry count > 3, attempting to refresh stream URL")
                 val currentPosition = player.currentPosition
                 player.seekTo(player.currentMediaItemIndex, currentPosition)
             }
@@ -1321,7 +1459,7 @@ class MusicService :
 
         // Safety Check : Ensuring player is initilized
         if (!playerInitialized.value) {
-            Timber.tag(TAG).w("playQueue called before player initialization, queuing request")
+            Timber.tag(SERVICE_TAG).w("playQueue called before player initialization, queuing request")
             scope.launch {
                 playerInitialized.first { it }
                 playQueue(queue, playWhenReady)
@@ -1395,7 +1533,7 @@ class MusicService :
     fun startRadioSeamlessly() {
         // Safety Check: Ensure Player is initilized
         if (!playerInitialized.value) {
-            Timber.tag(TAG).w("startRadioSeamlessly called before player initialization")
+            Timber.tag(SERVICE_TAG).w("startRadioSeamlessly called before player initialization")
             return
         }
 
@@ -1788,7 +1926,7 @@ class MusicService :
         val audioSessionId = player.audioSessionId
 
         if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId <= 0) {
-            Timber.tag(TAG)
+            Timber.tag(SERVICE_TAG)
                 .w("setupLoudnessEnhancer: invalid audioSessionId ($audioSessionId), cannot create effect yet")
             return
         }
@@ -1797,7 +1935,7 @@ class MusicService :
         if (loudnessEnhancer == null) {
             try {
                 loudnessEnhancer = LoudnessEnhancer(audioSessionId)
-                Timber.tag(TAG).d("LoudnessEnhancer created for sessionId=$audioSessionId")
+                Timber.tag(SERVICE_TAG).d("LoudnessEnhancer created for sessionId=$audioSessionId")
             } catch (e: Exception) {
                 reportException(e)
                 loudnessEnhancer = null
@@ -1820,8 +1958,8 @@ class MusicService :
                         database.format(currentMediaId).first()
                     }
 
-                    Timber.tag(TAG).d("Audio normalization enabled: $normalizeAudio")
-                    Timber.tag(TAG)
+                    Timber.tag(SERVICE_TAG).d("Audio normalization enabled: $normalizeAudio")
+                    Timber.tag(SERVICE_TAG)
                         .d("Format loudnessDb: ${format?.loudnessDb}, perceptualLoudnessDb: ${format?.perceptualLoudnessDb}")
 
                     // Use loudnessDb if available, otherwise fall back to perceptualLoudnessDb
@@ -1833,28 +1971,28 @@ class MusicService :
                             val targetGain = (-loudnessDb * 100).toInt()
                             val clampedGain = targetGain.coerceIn(MIN_GAIN_MB, MAX_GAIN_MB)
 
-                            Timber.tag(TAG)
+                            Timber.tag(SERVICE_TAG)
                                 .d("Calculated raw normalization gain: $targetGain mB (from loudness: $loudnessDb)")
 
                             try {
                                 loudnessEnhancer?.setTargetGain(clampedGain)
                                 loudnessEnhancer?.enabled = true
-                                Timber.tag(TAG).i("LoudnessEnhancer gain applied: $clampedGain mB")
+                                Timber.tag(SERVICE_TAG).i("LoudnessEnhancer gain applied: $clampedGain mB")
                             } catch (e: Exception) {
-                                Timber.tag(TAG).e(e, "Failed to apply loudness enhancement")
+                                Timber.tag(SERVICE_TAG).e(e, "Failed to apply loudness enhancement")
                                 reportException(e)
                                 releaseLoudnessEnhancer()
                             }
                         } else {
                             loudnessEnhancer?.enabled = false
-                            Timber.tag(TAG)
+                            Timber.tag(SERVICE_TAG)
                                 .w("Normalization enabled but no loudness data available - no normalization applied")
                         }
                     }
                 } else {
                     withContext(Dispatchers.Main) {
                         loudnessEnhancer?.enabled = false
-                        Timber.tag(TAG).d("setupLoudnessEnhancer: normalization disabled or mediaId unavailable")
+                        Timber.tag(SERVICE_TAG).d("setupLoudnessEnhancer: normalization disabled or mediaId unavailable")
                     }
                 }
             } catch (e: Exception) {
@@ -1867,10 +2005,10 @@ class MusicService :
     private fun releaseLoudnessEnhancer() {
         try {
             loudnessEnhancer?.release()
-            Timber.tag(TAG).d("LoudnessEnhancer released")
+            Timber.tag(SERVICE_TAG).d("LoudnessEnhancer released")
         } catch (e: Exception) {
             reportException(e)
-            Timber.tag(TAG).e(e, "Error releasing LoudnessEnhancer: ${e.message}")
+            Timber.tag(SERVICE_TAG).e(e, "Error releasing LoudnessEnhancer: ${e.message}")
         } finally {
             loudnessEnhancer = null
         }
@@ -1913,7 +2051,7 @@ class MusicService :
         if (positionMs < 3000) return // Don't save if less than 3 seconds played
         scope.launch(Dispatchers.IO + SilentHandler) {
             database.updatePlaybackPosition(episodeId, positionMs)
-            Timber.tag(TAG).d("Saved episode position: $episodeId at ${positionMs}ms")
+            Timber.tag(SERVICE_TAG).d("Saved episode position: $episodeId at ${positionMs}ms")
         }
     }
 
@@ -1929,7 +2067,7 @@ class MusicService :
                     // Only seek if we're still on the same episode
                     if (player.currentMediaItem?.mediaId == episodeId) {
                         player.seekTo(savedPosition)
-                        Timber.tag(TAG).d("Restored episode position: $episodeId to ${savedPosition}ms")
+                        Timber.tag(SERVICE_TAG).d("Restored episode position: $episodeId to ${savedPosition}ms")
                     }
                 }
             }
@@ -2058,7 +2196,7 @@ class MusicService :
             // Reset retry count for current song on successful playback
             player.currentMediaItem?.mediaId?.let { mediaId ->
                 resetRetryCount(mediaId)
-                Timber.tag(TAG).d("Playback successful for $mediaId, reset retry count")
+                Timber.tag(SERVICE_TAG).d("Playback successful for $mediaId, reset retry count")
             }
             scheduleCrossfade()
         }
@@ -2120,6 +2258,7 @@ class MusicService :
                 closeAudioEffectSession()
             }
         }
+
         if (events.containsAny(EVENT_TIMELINE_CHANGED, EVENT_POSITION_DISCONTINUITY)) {
             currentMediaMetadata.value = player.currentMetadata
         }
@@ -2359,18 +2498,18 @@ class MusicService :
 
         // Safety check : ensuring player is still initialized
         if (!playerInitialized.value) {
-            Timber.tag(TAG).e(error, "Player error occurred but player not initialized")
+            Timber.tag(SERVICE_TAG).e(error, "Player error occurred but player not initialized")
             return
         }
 
         val mediaId = player.currentMediaItem?.mediaId
-        Timber.tag(TAG)
+        Timber.tag(SERVICE_TAG)
             .w(error, "Player error occurred for $mediaId: errorCode=${error.errorCode}, message=${error.message}")
         reportException(error)
 
         // Check if this song has failed too many times
         if (mediaId != null && hasExceededRetryLimit(mediaId)) {
-            Timber.tag(TAG).w("Song $mediaId has exceeded retry limit, skipping")
+            Timber.tag(SERVICE_TAG).w("Song $mediaId has exceeded retry limit, skipping")
             markSongAsFailed(mediaId)
             handleFinalFailure()
             return
@@ -2384,31 +2523,31 @@ class MusicService :
         // Handle specific error types with strict strategies
         when {
             isAudioRendererError(error) -> {
-                Timber.tag(TAG).d("AudioTrack error detected (${error.errorCode}), performing safe recovery")
+                Timber.tag(SERVICE_TAG).d("AudioTrack error detected (${error.errorCode}), performing safe recovery")
                 handleAudioRendererError(mediaId)
                 return
             }
 
             isRangeNotSatisfiableError(error) -> {
-                Timber.tag(TAG).d("Range Not Satisfiable (416) detected, performing strict recovery")
+                Timber.tag(SERVICE_TAG).d("Range Not Satisfiable (416) detected, performing strict recovery")
                 handleRangeNotSatisfiableError(mediaId)
                 return
             }
 
             isPageReloadError(error) -> {
-                Timber.tag(TAG).d("Page reload error detected, performing strict recovery")
+                Timber.tag(SERVICE_TAG).d("Page reload error detected, performing strict recovery")
                 handlePageReloadError(mediaId)
                 return
             }
 
             isExpiredUrlError(error) -> {
-                Timber.tag(TAG).d("Expired URL (403) detected, refreshing stream URL")
+                Timber.tag(SERVICE_TAG).d("Expired URL (403) detected, refreshing stream URL")
                 handleExpiredUrlError(mediaId)
                 return
             }
 
             !isNetworkConnected.value || isNetworkRelatedError(error) -> {
-                Timber.tag(TAG).d("Network-related error detected, waiting for connection")
+                Timber.tag(SERVICE_TAG).d("Network-related error detected, waiting for connection")
                 waitOnNetworkError()
                 return
             }
@@ -2418,17 +2557,17 @@ class MusicService :
         if (error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
             error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
         ) {
-            Timber.tag(TAG).d("IO error detected (${error.errorCode}), attempting recovery")
+            Timber.tag(SERVICE_TAG).d("IO error detected (${error.errorCode}), attempting recovery")
             handleGenericIOError(mediaId)
             return
         }
 
         // Final fallback
         if (dataStore.get(AutoSkipNextOnErrorKey, false)) {
-            Timber.tag(TAG).d("Auto-skipping to next track due to unrecoverable error")
+            Timber.tag(SERVICE_TAG).d("Auto-skipping to next track due to unrecoverable error")
             skipOnError()
         } else {
-            Timber.tag(TAG).d("Stopping playback due to unrecoverable error")
+            Timber.tag(SERVICE_TAG).d("Stopping playback due to unrecoverable error")
             stopOnError()
         }
     }
@@ -2438,7 +2577,7 @@ class MusicService :
      * Clears both player cache and download cache, plus URL cache.
      */
     private fun performAggressiveCacheClear(mediaId: String) {
-        Timber.tag(TAG).d("Performing aggressive cache clear for $mediaId")
+        Timber.tag(SERVICE_TAG).d("Performing aggressive cache clear for $mediaId")
 
         // Clear URL cache
         songUrlCache.remove(mediaId)
@@ -2446,17 +2585,17 @@ class MusicService :
         // Clear player cache
         try {
             playerCache.removeResource(mediaId)
-            Timber.tag(TAG).d("Cleared player cache for $mediaId")
+            Timber.tag(SERVICE_TAG).d("Cleared player cache for $mediaId")
         } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Failed to clear player cache for $mediaId")
+            Timber.tag(SERVICE_TAG).e(e, "Failed to clear player cache for $mediaId")
         }
 
         // Clear decryption caches
         try {
             YTPlayerUtils.forceRefreshForVideo(mediaId)
-            Timber.tag(TAG).d("Cleared decryption caches for $mediaId")
+            Timber.tag(SERVICE_TAG).d("Cleared decryption caches for $mediaId")
         } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Failed to clear decryption caches for $mediaId")
+            Timber.tag(SERVICE_TAG).e(e, "Failed to clear decryption caches for $mediaId")
         }
     }
 
@@ -2474,7 +2613,7 @@ class MusicService :
     private fun incrementRetryCount(mediaId: String) {
         val currentRetries = currentMediaIdRetryCount[mediaId] ?: 0
         currentMediaIdRetryCount[mediaId] = currentRetries + 1
-        Timber.tag(TAG).d("Retry count for $mediaId: ${currentRetries + 1}/$MAX_RETRY_PER_SONG")
+        Timber.tag(SERVICE_TAG).d("Retry count for $mediaId: ${currentRetries + 1}/$MAX_RETRY_PER_SONG")
     }
 
     /**
@@ -2497,7 +2636,7 @@ class MusicService :
         failedSongsClearJob = scope.launch {
             delay(5 * 60 * 1000L) // 5 minutes
             recentlyFailedSongs.clear()
-            Timber.tag(TAG).d("Cleared recently failed songs list")
+            Timber.tag(SERVICE_TAG).d("Cleared recently failed songs list")
         }
     }
 
@@ -2518,7 +2657,7 @@ class MusicService :
             try {
                 // Pause playback immediately to stop the renderer
                 player.pause()
-                Timber.tag(TAG).d("Paused playback due to AudioTrack error")
+                Timber.tag(SERVICE_TAG).d("Paused playback due to AudioTrack error")
 
                 // Wait longer for audio renderer to settle before retry
                 // This prevents the renderer from continuing to fail in a loop
@@ -2526,7 +2665,7 @@ class MusicService :
 
                 // Check if player is still initialized before attempting recovery
                 if (!playerInitialized.value) {
-                    Timber.tag(TAG).w("Player no longer initialized, aborting AudioTrack recovery")
+                    Timber.tag(SERVICE_TAG).w("Player no longer initialized, aborting AudioTrack recovery")
                     return@launch
                 }
 
@@ -2537,7 +2676,7 @@ class MusicService :
                     player.seekTo(currentIndex, currentPosition)
                     player.prepare()
 
-                    Timber.tag(TAG).d("Retrying playback for $mediaId after AudioTrack error")
+                    Timber.tag(SERVICE_TAG).d("Retrying playback for $mediaId after AudioTrack error")
 
                     // Resume playback if it wasn't paused by user
                     if (wasPlayingBeforeAudioFocusLoss) {
@@ -2549,11 +2688,11 @@ class MusicService :
                         }
                     }
                 } else {
-                    Timber.tag(TAG).w("Invalid media item index during AudioTrack recovery")
+                    Timber.tag(SERVICE_TAG).w("Invalid media item index during AudioTrack recovery")
                     handleFinalFailure()
                 }
             } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Error during AudioTrack error recovery")
+                Timber.tag(SERVICE_TAG).e(e, "Error during AudioTrack error recovery")
                 handleFinalFailure()
             }
         }
@@ -2584,7 +2723,7 @@ class MusicService :
             player.seekTo(currentIndex, 0)
             player.prepare()
 
-            Timber.tag(TAG).d("Retrying playback for $mediaId after 416 error (from position 0)")
+            Timber.tag(SERVICE_TAG).d("Retrying playback for $mediaId after 416 error (from position 0)")
         }
     }
 
@@ -2602,7 +2741,7 @@ class MusicService :
 
         retryJob?.cancel()
         retryJob = scope.launch {
-            Timber.tag(TAG).d("Handling page reload error for $mediaId")
+            Timber.tag(SERVICE_TAG).d("Handling page reload error for $mediaId")
 
             // Clear all caches including decryption caches
             performAggressiveCacheClear(mediaId)
@@ -2616,7 +2755,7 @@ class MusicService :
             player.seekTo(currentIndex, currentPosition)
             player.prepare()
 
-            Timber.tag(TAG).d("Retrying playback for $mediaId after page reload error")
+            Timber.tag(SERVICE_TAG).d("Retrying playback for $mediaId after page reload error")
         }
     }
 
@@ -2633,13 +2772,13 @@ class MusicService :
 
         // Clear the cached URL
         songUrlCache.remove(mediaId)
-        Timber.tag(TAG).d("Cleared cached URL for $mediaId")
+        Timber.tag(SERVICE_TAG).d("Cleared cached URL for $mediaId")
 
         // Clear decryption caches
         try {
             YTPlayerUtils.forceRefreshForVideo(mediaId)
         } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Failed to clear decryption caches")
+            Timber.tag(SERVICE_TAG).e(e, "Failed to clear decryption caches")
         }
 
         retryJob?.cancel()
@@ -2652,7 +2791,7 @@ class MusicService :
             player.seekTo(currentIndex, currentPosition)
             player.prepare()
 
-            Timber.tag(TAG).d("Retrying playback for $mediaId after 403 error")
+            Timber.tag(SERVICE_TAG).d("Retrying playback for $mediaId after 403 error")
         }
     }
 
@@ -2677,7 +2816,7 @@ class MusicService :
             player.seekTo(currentIndex, currentPosition)
             player.prepare()
 
-            Timber.tag(TAG).d("Retrying playback for $mediaId after generic IO error")
+            Timber.tag(SERVICE_TAG).d("Retrying playback for $mediaId after generic IO error")
         }
     }
 
@@ -2686,10 +2825,10 @@ class MusicService :
      */
     private fun handleFinalFailure() {
         if (dataStore.get(AutoSkipNextOnErrorKey, false)) {
-            Timber.tag(TAG).d("All recovery attempts exhausted, auto-skipping to next track")
+            Timber.tag(SERVICE_TAG).d("All recovery attempts exhausted, auto-skipping to next track")
             skipOnError()
         } else {
-            Timber.tag(TAG).d("All recovery attempts exhausted, stopping playback")
+            Timber.tag(SERVICE_TAG).d("All recovery attempts exhausted, stopping playback")
             stopOnError()
         }
     }
@@ -2780,7 +2919,7 @@ class MusicService :
                 delay(INSTANT_SILENCE_SKIP_SETTLE_MS)
             }
             if (hops > 0) {
-                Timber.tag(TAG).d("Silence skip: jumped $hops times")
+                Timber.tag(SERVICE_TAG).d("Silence skip: jumped $hops times")
             }
         } finally {
             isSilenceSkipping = false
@@ -2861,6 +3000,7 @@ class MusicService :
                     mediaId,
                     audioQuality = audioQuality,
                     connectivityManager = connectivityManager,
+                    preferVideo = immersiveModeEnabled.value
                 )
             }.getOrElse { throwable ->
                 when (throwable) {
@@ -2898,10 +3038,10 @@ class MusicService :
                 val loudnessDb = nonNullPlayback.audioConfig?.loudnessDb
                 val perceptualLoudnessDb = nonNullPlayback.audioConfig?.perceptualLoudnessDb
 
-                Timber.tag(TAG)
+                Timber.tag(SERVICE_TAG)
                     .d("Storing format for $mediaId with loudnessDb: $loudnessDb, perceptualLoudnessDb: $perceptualLoudnessDb")
                 if (loudnessDb == null && perceptualLoudnessDb == null) {
-                    Timber.tag(TAG).w("No loudness data available from YouTube for video: $mediaId")
+                    Timber.tag(SERVICE_TAG).w("No loudness data available from YouTube for video: $mediaId")
                 }
 
                 database.query {
@@ -3012,7 +3152,7 @@ class MusicService :
 
     private fun saveQueueToDisk() {
         if (player.mediaItemCount == 0) {
-            Timber.tag(TAG).d("Skipping queue save - no media items")
+            Timber.tag(SERVICE_TAG).d("Skipping queue save - no media items")
             return
         }
 
@@ -3050,9 +3190,9 @@ class MusicService :
                         oos.writeObject(persistQueue)
                     }
                 }
-                Timber.tag(TAG).d("Queue saved successfully")
+                Timber.tag(SERVICE_TAG).d("Queue saved successfully")
             }.onFailure {
-                Timber.tag(TAG).e(it, "Failed to save queue")
+                Timber.tag(SERVICE_TAG).e(it, "Failed to save queue")
                 reportException(it)
             }
 
@@ -3062,9 +3202,9 @@ class MusicService :
                         oos.writeObject(persistAutomix)
                     }
                 }
-                Timber.tag(TAG).d("Automix saved successfully")
+                Timber.tag(SERVICE_TAG).d("Automix saved successfully")
             }.onFailure {
-                Timber.tag(TAG).e(it, "Failed to save automix")
+                Timber.tag(SERVICE_TAG).e(it, "Failed to save automix")
                 reportException(it)
             }
 
@@ -3074,13 +3214,13 @@ class MusicService :
                         oos.writeObject(persistPlayerState)
                     }
                 }
-                Timber.tag(TAG).d("Player state saved successfully")
+                Timber.tag(SERVICE_TAG).d("Player state saved successfully")
             }.onFailure {
-                Timber.tag(TAG).e(it, "Failed to save player state")
+                Timber.tag(SERVICE_TAG).e(it, "Failed to save player state")
                 reportException(it)
             }
         } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Error during queue save operation")
+            Timber.tag(SERVICE_TAG).e(e, "Error during queue save operation")
             reportException(e)
         }
     }
@@ -3437,6 +3577,11 @@ class MusicService :
 
     companion object {
         const val ROOT = "root"
+        const val HOME = "home"
+        const val QUICK_PICKS = "quick_picks"
+        const val FORGOTTEN_FAVORITES = "forgotten_favorites"
+        const val MOST_PLAYED = "most_played"
+        const val RECENTLY_PLAYED_EXTERNAL = "recently_played_external"
         const val SONG = "song"
         const val ARTIST = "artist"
         const val ALBUM = "album"
@@ -3459,7 +3604,7 @@ class MusicService :
         private const val MAX_GAIN_MB = 300 // Maximum gain in millibels (3 dB)
         private const val MIN_GAIN_MB = -1500 // Minimum gain in millibels (-15 dB)
 
-        private const val TAG = "MusicService"
+        private const val SERVICE_TAG = "MusicService"
 
         @Volatile
         var isRunning = false

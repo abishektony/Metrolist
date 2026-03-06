@@ -102,6 +102,8 @@ import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
 import com.metrolist.music.ui.component.Icon as MIcon
+import com.metrolist.music.LocalPearConnectClient
+import com.metrolist.music.pearconnect.PearConnectState
 
 /**
  * Stable wrapper for progress state - reads values only during draw phase
@@ -130,15 +132,29 @@ fun MiniPlayer(
     // Create stable progress state - doesn't cause recomposition on position changes
     val progressState = remember { ProgressState(positionState, durationState) }
 
+    // Pear Connect state - when connected, override with desktop playback
+    val pearConnectClient = LocalPearConnectClient.current
+    val pearState by pearConnectClient?.state?.collectAsState()
+        ?: remember { mutableStateOf(PearConnectState.DISCONNECTED) }
+    val isPearConnected = pearState == PearConnectState.CONNECTED
+    val desktopPlaybackState by pearConnectClient?.desktopPlaybackState?.collectAsState()
+        ?: remember { mutableStateOf(null) }
+
     if (useNewMiniPlayerDesign) {
         NewMiniPlayer(
             progressState = progressState,
+            isPearConnected = isPearConnected,
+            desktopPlaybackState = desktopPlaybackState,
+            pearConnectClient = pearConnectClient,
             modifier = modifier
         )
     } else {
         Box(modifier = modifier.fillMaxWidth()) {
             LegacyMiniPlayer(
                 progressState = progressState,
+                isPearConnected = isPearConnected,
+                desktopPlaybackState = desktopPlaybackState,
+                pearConnectClient = pearConnectClient,
                 modifier = Modifier.align(Alignment.Center)
             )
         }
@@ -152,6 +168,9 @@ fun MiniPlayer(
 @Composable
 private fun NewMiniPlayer(
     progressState: ProgressState,
+    isPearConnected: Boolean = false,
+    desktopPlaybackState: com.metrolist.music.pearconnect.PlaybackStatePayload? = null,
+    pearConnectClient: com.metrolist.music.pearconnect.PearConnectClient? = null,
     modifier: Modifier = Modifier
 ) {
     val playerConnection = LocalPlayerConnection.current ?: return
@@ -187,7 +206,7 @@ private fun NewMiniPlayer(
     // Disable swipe for Listen Together guests
     val listenTogetherManager = LocalListenTogetherManager.current
     val isListenTogetherGuest = listenTogetherManager?.let { it.isInRoom && !it.isHost } ?: false
-    val swipeThumbnail = swipeThumbnailPref && !isListenTogetherGuest
+    val swipeThumbnail = swipeThumbnailPref && !isListenTogetherGuest && !isPearConnected
     
     val layoutDirection = LocalLayoutDirection.current
     val coroutineScope = rememberCoroutineScope()
@@ -216,6 +235,13 @@ private fun NewMiniPlayer(
     val outlineColor = MaterialTheme.colorScheme.outline
     val onSurfaceColor = MaterialTheme.colorScheme.onSurface
     val errorColor = MaterialTheme.colorScheme.error
+
+    // Derive Pear-aware display values
+    val pearTrack = if (isPearConnected) desktopPlaybackState?.trackInfo else null
+    val pearProgress = if (isPearConnected && desktopPlaybackState != null && desktopPlaybackState.duration > 0) {
+        (desktopPlaybackState.currentTime / desktopPlaybackState.duration).toFloat().coerceIn(0f, 1f)
+    } else null
+    val pearIsPlaying = if (isPearConnected) desktopPlaybackState?.isPlaying ?: false else false
 
     Box(
         modifier = modifier
@@ -296,51 +322,144 @@ private fun NewMiniPlayer(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 8.dp),
             ) {
-                // Play button with progress - isolated composable
-                NewMiniPlayerPlayButton(
-                    progressState = progressState,
-                    playbackState = playbackState,
-                    isCasting = isCasting,
-                    castHandler = castHandler,
-                    playerConnection = playerConnection,
-                    mediaMetadata = mediaMetadata,
-                    primaryColor = primaryColor,
-                    outlineColor = outlineColor,
-                    listenTogetherManager = listenTogetherManager
-                )
+                if (isPearConnected && pearTrack != null) {
+                    // ── Pear Connect Mode ──────────────────────────────────────────
+                    // Thumbnail with progress ring and Pear indicator
+                    val pearProgress2 = pearProgress ?: 0f
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .drawWithContent {
+                                drawContent()
+                                val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+                                val diameter = size.minDimension
+                                val topLeft = Offset((size.width - diameter) / 2, (size.height - diameter) / 2)
+                                drawArc(
+                                    color = outlineColor.copy(alpha = 0.2f),
+                                    startAngle = 0f, sweepAngle = 360f, useCenter = false,
+                                    topLeft = topLeft, size = Size(diameter, diameter), style = stroke
+                                )
+                                drawArc(
+                                    color = primaryColor,
+                                    startAngle = -90f, sweepAngle = 360f * pearProgress2, useCenter = false,
+                                    topLeft = topLeft, size = Size(diameter, diameter), style = stroke
+                                )
+                            }
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .border(1.dp, outlineColor.copy(alpha = 0.3f), CircleShape)
+                                .clickable {
+                                    playerConnection.togglePlayPause()
+                                }
+                        ) {
+                            AsyncImage(
+                                model = pearTrack.thumbnail,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize().clip(CircleShape)
+                            )
+                            if (!pearIsPlaying) {
+                                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f), CircleShape))
+                                Icon(
+                                    painter = painterResource(R.drawable.play),
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
 
-                Spacer(modifier = Modifier.width(16.dp))
+                    Spacer(modifier = Modifier.width(16.dp))
 
-                // Song info - isolated composable
-                NewMiniPlayerSongInfo(
-                    mediaMetadata = mediaMetadata,
-                    onSurfaceColor = onSurfaceColor,
-                    errorColor = errorColor,
-                    modifier = Modifier.weight(1f)
-                )
+                    // Desktop song info
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = pearTrack.title,
+                            color = onSurfaceColor,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.basicMarquee(iterations = 1, initialDelayMillis = 3000, velocity = 30.dp)
+                        )
+                        Text(
+                            text = pearTrack.artist + " • 🍐",
+                            color = onSurfaceColor.copy(alpha = 0.7f),
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.basicMarquee(iterations = 1, initialDelayMillis = 3000, velocity = 30.dp)
+                        )
+                    }
 
-                Spacer(modifier = Modifier.width(12.dp))
-                
-                // Cast indicator
-                if (isCasting) {
-                    Icon(
-                        painter = painterResource(R.drawable.cast_connected),
-                        contentDescription = "Casting",
-                        tint = primaryColor,
-                        modifier = Modifier.size(20.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // Next button routes to desktop
+                    IconButton(onClick = { playerConnection.seekToNext() }, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            painter = painterResource(R.drawable.skip_next),
+                            contentDescription = "Next",
+                            tint = onSurfaceColor,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                } else {
+                    // ── Normal Local / Cast Mode ──────────────────────────────────
+                    // Play button with progress - isolated composable
+                    NewMiniPlayerPlayButton(
+                        progressState = progressState,
+                        playbackState = playbackState,
+                        isCasting = isCasting,
+                        castHandler = castHandler,
+                        playerConnection = playerConnection,
+                        mediaMetadata = mediaMetadata,
+                        primaryColor = primaryColor,
+                        outlineColor = outlineColor,
+                        listenTogetherManager = listenTogetherManager
                     )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    // Song info - isolated composable
+                    NewMiniPlayerSongInfo(
+                        mediaMetadata = mediaMetadata,
+                        onSurfaceColor = onSurfaceColor,
+                        errorColor = errorColor,
+                        modifier = Modifier.weight(1f)
+                    )
+
                     Spacer(modifier = Modifier.width(12.dp))
+                    
+                    // Cast indicator
+                    if (isCasting) {
+                        Icon(
+                            painter = painterResource(R.drawable.cast_connected),
+                            contentDescription = "Casting",
+                            tint = primaryColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                    }
+
+                    // Subscribe button - isolated composable
+                    mediaMetadata?.artists?.firstOrNull()?.id?.let { artistId ->
+                        SubscribeButton(artistId = artistId, metadata = mediaMetadata!!)
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // Favorite button - isolated composable
+                    mediaMetadata?.let { FavoriteButton(songId = it.id) }
                 }
-
-                // Subscribe button - isolated composable
-                mediaMetadata?.artists?.firstOrNull()?.id?.let { artistId ->
-                    SubscribeButton(artistId = artistId, metadata = mediaMetadata!!)
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                // Favorite button - isolated composable
-                mediaMetadata?.let { FavoriteButton(songId = it.id) }
             }
         }
     }
@@ -527,6 +646,9 @@ private fun NewMiniPlayerSongInfo(
 @Composable
 private fun LegacyMiniPlayer(
     progressState: ProgressState,
+    isPearConnected: Boolean = false,
+    desktopPlaybackState: com.metrolist.music.pearconnect.PlaybackStatePayload? = null,
+    pearConnectClient: com.metrolist.music.pearconnect.PearConnectClient? = null,
     modifier: Modifier = Modifier
 ) {
     val playerConnection = LocalPlayerConnection.current ?: return
@@ -663,29 +785,55 @@ private fun LegacyMiniPlayer(
                 .offset { IntOffset(offsetXAnimatable.value.roundToInt(), 0) }
                 .padding(end = 12.dp),
         ) {
-            Box(Modifier.weight(1f)) {
-                mediaMetadata?.let {
-                    LegacyMiniMediaInfo(
-                        mediaMetadata = it,
-                        pureBlack = pureBlack,
-                        modifier = Modifier.padding(horizontal = 6.dp),
-                    )
+            if (isPearConnected && desktopPlaybackState?.trackInfo != null) {
+                val pearTrack = desktopPlaybackState.trackInfo
+                val pearIsPlaying = desktopPlaybackState.isPlaying
+                Box(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 6.dp)) {
+                        AsyncImage(
+                            model = pearTrack.thumbnail,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(ThumbnailCornerRadius))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text(text = pearTrack.title, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                            Text(text = pearTrack.artist + " • 🍐", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
-            }
+                IconButton(onClick = { if (pearIsPlaying) pearConnectClient?.pause() else pearConnectClient?.play() }) {
+                    Icon(painter = painterResource(if (pearIsPlaying) R.drawable.pause else R.drawable.play), contentDescription = null)
+                }
+                IconButton(onClick = { pearConnectClient?.next() }) {
+                    Icon(painter = painterResource(R.drawable.skip_next), contentDescription = null)
+                }
+            } else {
+                Box(Modifier.weight(1f)) {
+                    mediaMetadata?.let {
+                        LegacyMiniMediaInfo(
+                            mediaMetadata = it,
+                            pureBlack = pureBlack,
+                            modifier = Modifier.padding(horizontal = 6.dp),
+                        )
+                    }
+                }
 
-            LegacyPlayPauseButton(
-                playbackState = playbackState,
-                isCasting = isCasting,
-                castHandler = castHandler,
-                playerConnection = playerConnection,
-                listenTogetherManager = listenTogetherManager
-            )
+                LegacyPlayPauseButton(
+                    playbackState = playbackState,
+                    isCasting = isCasting,
+                    castHandler = castHandler,
+                    playerConnection = playerConnection,
+                    listenTogetherManager = listenTogetherManager
+                )
 
-            IconButton(
-                    enabled = canSkipNext && !isListenTogetherGuest,
-                    onClick = if (isListenTogetherGuest) ({}) else ({ playerConnection.seekToNext() }),
-            ) {
-                Icon(painter = painterResource(R.drawable.skip_next), contentDescription = null)
+                IconButton(
+                        enabled = canSkipNext && !isListenTogetherGuest,
+                        onClick = if (isListenTogetherGuest) ({}) else ({ playerConnection.seekToNext() }),
+                ) {
+                    Icon(painter = painterResource(R.drawable.skip_next), contentDescription = null)
+                }
             }
         }
 

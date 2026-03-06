@@ -136,7 +136,7 @@ import com.metrolist.music.constants.SleepTimerDefaultKey
 import com.metrolist.music.utils.dataStore
 import androidx.datastore.preferences.core.edit
 import android.widget.Toast
-
+import com.metrolist.music.extensions.toMediaItem
 
 @SuppressLint("UnrememberedMutableState")
 @OptIn(ExperimentalFoundationApi::class)
@@ -171,7 +171,14 @@ fun Queue(
     val isPlaying by playerConnection.isEffectivelyPlaying.collectAsState()
     val repeatMode by playerConnection.repeatMode.collectAsState()
 
-    val currentWindowIndex by playerConnection.currentWindowIndex.collectAsState()
+    val pearConnectClient = com.metrolist.music.LocalPearConnectClient.current
+    val pearState by pearConnectClient?.state?.collectAsState() ?: remember { mutableStateOf(com.metrolist.music.pearconnect.PearConnectState.DISCONNECTED) }
+    val isPearConnected = pearState == com.metrolist.music.pearconnect.PearConnectState.CONNECTED
+    val desktopQueue by pearConnectClient?.desktopQueue?.collectAsState() ?: remember { mutableStateOf(emptyList()) }
+    val desktopPlaybackState by pearConnectClient?.desktopPlaybackState?.collectAsState() ?: remember { mutableStateOf(null) }
+
+    val rawCurrentWindowIndex by playerConnection.currentWindowIndex.collectAsState()
+    val currentWindowIndex = if (isPearConnected) desktopPlaybackState?.queuePosition ?: 0 else rawCurrentWindowIndex
     val mediaMetadata by playerConnection.mediaMetadata.collectAsState()
 
     val currentFormat by playerConnection.currentFormat.collectAsState(initial = null)
@@ -637,12 +644,33 @@ fun Queue(
         },
     ) {
         val queueTitle by playerConnection.queueTitle.collectAsState()
-        val queueWindows by playerConnection.queueWindows.collectAsState()
+        val rawQueueWindows by playerConnection.queueWindows.collectAsState()
+        val queueWindows = remember(isPearConnected, desktopQueue, rawQueueWindows) {
+            if (isPearConnected) {
+                desktopQueue.mapIndexed { index, item ->
+                    Timeline.Window().apply {
+                        uid = item.videoId
+                        firstPeriodIndex = index
+                        mediaItem = MediaMetadata(
+                            id = item.videoId,
+                            title = item.title,
+                            artists = listOf(MediaMetadata.Artist(id = "", name = item.artist)),
+                            duration = item.duration.toInt(),
+                            thumbnailUrl = item.thumbnail?.takeUnless { it.isBlank() } ?: "https://i.ytimg.com/vi/${item.videoId}/maxresdefault.jpg",
+                            album = null
+                        ).toMediaItem()
+                        durationUs = (item.duration * 1_000_000).toLong()
+                    }
+                }
+            } else {
+                rawQueueWindows
+            }
+        }
         val automix by playerConnection.service.automixItems.collectAsState()
         val mutableQueueWindows = remember { mutableStateListOf<Timeline.Window>() }
         val queueLength =
             remember(queueWindows) {
-                queueWindows.sumOf { it.mediaItem.metadata!!.duration }
+                queueWindows.sumOf { it.mediaItem.metadata?.duration ?: 0 }
             }
 
         val coroutineScope = rememberCoroutineScope()
@@ -745,11 +773,11 @@ fun Queue(
 
                 itemsIndexed(
                     items = mutableQueueWindows,
-                    key = { _, item -> item.uid.hashCode() },
+                    key = { index, item -> "${item.uid}_$index" },
                 ) { index, window ->
                     ReorderableItem(
                         state = reorderableState,
-                        key = window.uid.hashCode(),
+                        key = "${window.uid}_$index",
                     ) {
                         val currentItem by rememberUpdatedState(window)
                         val isActive = window.uid == currentPlayingUid
@@ -866,7 +894,13 @@ fun Queue(
                                                     onCheckedChange(window.mediaItem.mediaId !in selection)
                                                 } else if (!isListenTogetherGuest) {
                                                     if (index == currentWindowIndex) {
-                                                        if (isCasting) {
+                                                        if (isPearConnected) {
+                                                            if (desktopPlaybackState?.isPlaying == true) {
+                                                                pearConnectClient?.pause()
+                                                            } else {
+                                                                pearConnectClient?.play()
+                                                            }
+                                                        } else if (isCasting) {
                                                             if (castIsPlaying) {
                                                                 castHandler?.pause()
                                                             } else {
@@ -876,7 +910,9 @@ fun Queue(
                                                             playerConnection.togglePlayPause()
                                                         }
                                                     } else {
-                                                        if (isCasting) {
+                                                        if (isPearConnected) {
+                                                            pearConnectClient?.playVideoOnDesktop(window.mediaItem.mediaId)
+                                                        } else if (isCasting) {
                                                             val mediaId = window.mediaItem.mediaId
                                                             val navigated = castHandler?.navigateToMediaIfInQueue(mediaId) ?: false
                                                             if (!navigated) {
