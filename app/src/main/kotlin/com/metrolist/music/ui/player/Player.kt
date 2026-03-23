@@ -10,6 +10,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.view.ContextThemeWrapper
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.media3.ui.PlayerView
@@ -249,9 +250,11 @@ fun BottomSheetPlayer(
     val isPearConnected = pearState == PearConnectState.CONNECTED
     val desktopPlaybackState by pearConnectClient?.desktopPlaybackState?.collectAsState()
         ?: remember { mutableStateOf(null) }
+    val playbackTarget = desktopPlaybackState?.playbackTarget ?: "laptop"
+    val isPearRemoteMode = isPearConnected && playbackTarget == "laptop"
 
     val rawIsPlaying by playerConnection.isPlaying.collectAsState()
-    val isPlaying = if (isPearConnected) desktopPlaybackState?.isPlaying == true else rawIsPlaying
+    val isPlaying = if (isPearRemoteMode) desktopPlaybackState?.isPlaying == true else rawIsPlaying
 
     val isKeepScreenOn by rememberPreference(KeepScreenOn, false)
     val keepScreenOn = isPlaying && isKeepScreenOn
@@ -296,17 +299,17 @@ fun BottomSheetPlayer(
         }
 
     val rawPlaybackState by playerConnection.playbackState.collectAsState()
-    val playbackState = if (isPearConnected && desktopPlaybackState?.trackInfo != null) Player.STATE_READY else rawPlaybackState
+    val playbackState = if (isPearRemoteMode && desktopPlaybackState?.trackInfo != null) Player.STATE_READY else rawPlaybackState
 
     val rawMediaMetadata by playerConnection.mediaMetadata.collectAsState()
-    val mediaMetadata = remember(isPearConnected, desktopPlaybackState?.trackInfo, rawMediaMetadata) {
-        if (isPearConnected && desktopPlaybackState?.trackInfo != null) {
+    val mediaMetadata = remember(isPearRemoteMode, desktopPlaybackState?.trackInfo, rawMediaMetadata) {
+        if (isPearRemoteMode && desktopPlaybackState?.trackInfo != null) {
             val track = desktopPlaybackState!!.trackInfo!!
             MediaMetadata(
                 id = track.videoId,
                 title = track.title,
                 artists = listOf(MediaMetadata.Artist(id = "", name = track.artist)),
-                duration = desktopPlaybackState!!.duration.toInt(),
+                duration = (desktopPlaybackState!!.duration * 1000).toInt(),
                 thumbnailUrl = track.thumbnail?.takeUnless { it.isBlank() } ?: "https://i.ytimg.com/vi/${track.videoId}/maxresdefault.jpg",
                 album = null
             )
@@ -318,9 +321,9 @@ fun BottomSheetPlayer(
     val automix by playerConnection.service.automixItems.collectAsState()
     val repeatMode by playerConnection.repeatMode.collectAsState()
     val rawCanSkipPrevious by playerConnection.canSkipPrevious.collectAsState()
-    val canSkipPrevious = if (isPearConnected) true else rawCanSkipPrevious
+    val canSkipPrevious = if (isPearRemoteMode) true else rawCanSkipPrevious
     val rawCanSkipNext by playerConnection.canSkipNext.collectAsState()
-    val canSkipNext = if (isPearConnected) true else rawCanSkipNext
+    val canSkipNext = if (isPearRemoteMode) true else rawCanSkipNext
     val isMuted by playerConnection.isMuted.collectAsState()
 
     val sliderStyle by rememberEnumPreference(SliderStyleKey, SliderStyle.DEFAULT)
@@ -358,7 +361,7 @@ fun BottomSheetPlayer(
     
     val effectivePosition by remember {
         derivedStateOf {
-            if (isPearConnected && desktopPlaybackState != null) {
+            if (isPearRemoteMode && desktopPlaybackState != null) {
                 (desktopPlaybackState!!.currentTime * 1000).toLong()
             } else if (isCasting) {
                 castPosition
@@ -370,7 +373,7 @@ fun BottomSheetPlayer(
 
     val effectiveDuration by remember {
         derivedStateOf {
-            if (isPearConnected && desktopPlaybackState != null) {
+            if (isPearRemoteMode && desktopPlaybackState != null) {
                 (desktopPlaybackState!!.duration * 1000).toLong()
             } else {
                 duration
@@ -379,13 +382,15 @@ fun BottomSheetPlayer(
     }
 
     val onSeekToPrevious: () -> Unit = {
-        playerConnection.seekToPrevious()
+        if (isPearRemoteMode) pearConnectClient?.previous() else playerConnection.seekToPrevious()
     }
     val onSeekToNext: () -> Unit = {
-        playerConnection.seekToNext()
+        if (isPearRemoteMode) pearConnectClient?.next() else playerConnection.seekToNext()
     }
     val onPlayPause: () -> Unit = {
-        if (isListenTogetherGuest) {
+        if (isPearRemoteMode) {
+            if (desktopPlaybackState?.isPlaying == true) pearConnectClient?.pause() else pearConnectClient?.play()
+        } else if (isListenTogetherGuest) {
             playerConnection.toggleMute()
         } else if (playbackState == Player.STATE_ENDED) {
             playerConnection.seekTo(0)
@@ -712,13 +717,26 @@ fun BottomSheetPlayer(
         playerConnection.service.setImmersiveMode(isFullScreen)
     }
 
-    // Position update - only for local playback
+    // Position update - only for local playback or PearConnect
     // When casting, we use castPosition directly to avoid sync issues
     // Use isPlaying instead of playbackState to ensure continuous updates during playback
     LaunchedEffect(isPlaying, isCasting, isPearConnected, desktopPlaybackState) {
-        if (isPearConnected && desktopPlaybackState != null && sliderPosition == null) {
-            position = (desktopPlaybackState!!.currentTime * 1000).toLong()
+        if (isPearConnected && desktopPlaybackState != null) {
+            val baseTime = (desktopPlaybackState!!.currentTime * 1000).toLong()
             duration = (desktopPlaybackState!!.duration * 1000).toLong()
+            
+            if (desktopPlaybackState!!.isPlaying && sliderPosition == null) {
+                val localStartTime = System.currentTimeMillis()
+                while (isActive) {
+                    val elapsedTime = System.currentTimeMillis() - localStartTime
+                    if (sliderPosition == null) {
+                        position = java.lang.Long.min(baseTime + elapsedTime, duration)
+                    }
+                    delay(100)
+                }
+            } else if (sliderPosition == null) {
+                position = baseTime
+            }
         } else if (!isCasting && isPlaying) {
             while (isActive) {
                 delay(100) // Update more frequently for smoother progress bar
@@ -731,7 +749,7 @@ fun BottomSheetPlayer(
     }
     
     // Also update position when playback state changes (e.g., song change, seek)
-    LaunchedEffect(playbackState, mediaMetadata?.id, isPearConnected, desktopPlaybackState) {
+    LaunchedEffect(playbackState, mediaMetadata?.id, isPearConnected) {
         if (isPearConnected && desktopPlaybackState != null) {
             position = (desktopPlaybackState!!.currentTime * 1000).toLong()
             duration = (desktopPlaybackState!!.duration * 1000).toLong()
@@ -782,14 +800,37 @@ fun BottomSheetPlayer(
                     .fillMaxSize()
                     .background(bottomSheetBackgroundColor)
             ) {
+                val immersiveModeEnabled by playerConnection.service.immersiveModeEnabled.collectAsState()
+
+                if (isFullScreen && immersiveModeEnabled) {
+                    AndroidView<PlayerView>(
+                        factory = { ctx ->
+                            // Use the themed context to force TextureView surface type
+                            PlayerView(ContextThemeWrapper(ctx, R.style.PlayerViewTexture)).apply {
+                                useController = false
+                                player = playerConnection.player
+                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                setBackgroundColor(android.graphics.Color.BLACK)
+                                (videoSurfaceView as? SurfaceView)?.setZOrderMediaOverlay(false)
+                            }
+                        },
+                        update = { view ->
+                            view.player = playerConnection.player
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(alpha = backgroundAlpha)
+                    )
+                }
+
                 when (playerBackground) {
                     PlayerBackgroundStyle.BLUR -> {
                         AnimatedContent(
-                            targetState = mediaMetadata?.thumbnailUrl,
+                            targetState = if (immersiveModeEnabled) null else mediaMetadata?.thumbnailUrl,
                             transitionSpec = {
                                 fadeIn(tween(800)).togetherWith(fadeOut(tween(800)))
                             },
-                            label = "blurBackground"
+                             label = "blurBackground"
                         ) { thumbnailUrl ->
                             if (thumbnailUrl != null) {
                                 Box(modifier = Modifier.alpha(backgroundAlpha)) {
@@ -816,11 +857,11 @@ fun BottomSheetPlayer(
                     }
                     PlayerBackgroundStyle.GRADIENT -> {
                         AnimatedContent(
-                            targetState = gradientColors,
+                            targetState = if (immersiveModeEnabled) emptyList() else gradientColors,
                             transitionSpec = {
                                 fadeIn(tween(800)).togetherWith(fadeOut(tween(800)))
                             },
-                            label = "gradientBackground"
+                             label = "gradientBackground"
                         ) { colors ->
                             if (colors.isNotEmpty()) {
                                 val gradientColorStops = if (colors.size >= 3) {
@@ -849,27 +890,6 @@ fun BottomSheetPlayer(
                     else -> {
                         PlayerBackgroundStyle.DEFAULT
                     }
-                }
-
-                if (isFullScreen) {
-                    AndroidView<PlayerView>(
-                        factory = { ctx ->
-                            PlayerView(ctx).apply {
-                                useController = false
-                                player = playerConnection.player
-                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                setBackgroundColor(android.graphics.Color.BLACK)
-                            }
-                        },
-                        update = { view ->
-                            view.player = playerConnection.player
-                            (view.videoSurfaceView as? SurfaceView)?.setZOrderMediaOverlay(true)
-                        },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black)
-                            .graphicsLayer(alpha = backgroundAlpha)
-                    )
                 }
             }
         },
@@ -1307,7 +1327,11 @@ fun BottomSheetPlayer(
     onValueChangeFinished = {
         if (!isListenTogetherGuest) {
             sliderPosition?.let {
-                playerConnection.seekTo(it)
+                if (isPearConnected) {
+                    pearConnectClient?.seekTo(it / 1000)
+                } else {
+                    playerConnection.seekTo(it)
+                }
                 position = it
             }
             sliderPosition = null
@@ -1329,7 +1353,11 @@ fun BottomSheetPlayer(
                             },
                             onValueChangeFinished = {
                                 sliderPosition?.let {
-                                    playerConnection.seekTo(it)
+                                    if (isPearConnected) {
+                                        pearConnectClient?.seekTo(it / 1000)
+                                    } else {
+                                        playerConnection.seekTo(it)
+                                    }
                                     position = it
                                 }
                                 sliderPosition = null
@@ -1347,7 +1375,11 @@ fun BottomSheetPlayer(
                             },
                             onValueChangeFinished = {
                                 sliderPosition?.let {
-                                    playerConnection.seekTo(it)
+                                    if (isPearConnected) {
+                                        pearConnectClient?.seekTo(it / 1000)
+                                    } else {
+                                        playerConnection.seekTo(it)
+                                    }
                                     position = it
                                 }
                                 sliderPosition = null
@@ -1371,7 +1403,11 @@ fun BottomSheetPlayer(
     onValueChangeFinished = {
         if (!isListenTogetherGuest) {
             sliderPosition?.let {
-                playerConnection.seekTo(it)
+                if (isPearConnected) {
+                    pearConnectClient?.seekTo(it / 1000)
+                } else {
+                    playerConnection.seekTo(it)
+                }
                 position = it
             }
             sliderPosition = null
@@ -1826,6 +1862,7 @@ fun BottomSheetPlayer(
         ) {
             mediaMetadata?.let { metadata ->
                 ImmersivePlayerUI(
+                    player = playerConnection.player,
                     mediaMetadata = metadata,
                     isPlaying = effectiveIsPlaying,
                     playbackState = playbackState,
@@ -1924,6 +1961,7 @@ fun InlineLyricsView(
 @OptIn(UnstableApi::class)
 @Composable
 fun ImmersivePlayerUI(
+    player: Player?,
     mediaMetadata: MediaMetadata,
     isPlaying: Boolean,
     playbackState: Int,
@@ -1945,10 +1983,31 @@ fun ImmersivePlayerUI(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .drawBehind {
-                drawRect(Color.Black.copy(alpha = 0.3f))
-            }
+            .background(Color.Black) // Static black background if video fails
     ) {
+        // Video Background
+        if (player != null) {
+            AndroidView(
+                factory = { context ->
+                    PlayerView(context).apply {
+                        useController = false
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        this.player = player
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize(),
+                update = { view ->
+                    view.player = player
+                }
+            )
+        }
+        
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+        ) {
         // Top Left Close Button
         IconButton(
             onClick = onToggleFullScreen,
@@ -2149,7 +2208,7 @@ fun ImmersivePlayerUI(
         }
     }
 }
-
+}
 
 @Composable
 fun MoreActionsButton(

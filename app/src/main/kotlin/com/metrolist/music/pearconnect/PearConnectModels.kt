@@ -7,7 +7,7 @@ package com.metrolist.music.pearconnect
 
 import kotlinx.serialization.Serializable
 
-enum class PearConnectMode {
+enum class PearConnectMethod {
     LOCAL,
     SUPABASE,
     AUTO
@@ -53,6 +53,7 @@ data class PlaybackStatePayload(
     val queuePosition: Int = 0,
     val queueLength: Int = 0,
     val playbackTarget: String? = null,
+    val timestamp: Long = 0,
     // Legacy compat field (some older versions may send this)
     val currentPosition: Long = 0
 )

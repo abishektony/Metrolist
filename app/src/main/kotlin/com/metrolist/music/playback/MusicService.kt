@@ -48,6 +48,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
@@ -134,6 +135,11 @@ import com.metrolist.music.constants.SkipSilenceInstantKey
 import com.metrolist.music.constants.SkipSilenceKey
 import com.metrolist.music.constants.PearConnectMode
 import com.metrolist.music.constants.PearConnectModeKey
+import com.metrolist.music.pearconnect.PlaybackStatePayload
+import com.metrolist.music.pearconnect.TrackInfo
+import com.metrolist.music.pearconnect.QueueItemPayload
+import com.metrolist.music.pearconnect.RemoteCommand
+import com.metrolist.music.pearconnect.PearConnectState
 import com.metrolist.music.db.MusicDatabase
 import com.metrolist.music.db.entities.Event
 import com.metrolist.music.db.entities.FormatEntity
@@ -271,6 +277,7 @@ class MusicService :
     }
 
     private var scope = CoroutineScope(Dispatchers.Main) + Job()
+    private var pearConnectSyncJob: Job? = null
 
     private val binder = MusicBinder()
 
@@ -342,13 +349,22 @@ class MusicService :
             }
 
             // Only force re-fetch if we're currently playing something locally
-            player.currentMediaItem?.mediaId?.let { mediaId ->
+            player.currentMediaItem?.let { mediaItem ->
+                val mediaId = mediaItem.mediaId
+                val pos = player.currentPosition
+                val index = player.currentMediaItemIndex
+                val isPlaying = player.isPlaying
+                
                 // Mark for bypass so it gets a fresh YT stream (with video if enabled)
                 bypassCacheForQualityChange.add(mediaId)
-                // Seek locally to force ExoPlayer's ResolvingDataSource to re-trigger
-                val pos = player.currentPosition
-                player.seekTo(player.currentMediaItemIndex, pos)
+                
+                // Re-set the media item to force a new resolution and source creation
+                player.replaceMediaItem(index, mediaItem)
+                player.seekTo(index, pos)
                 player.prepare()
+                if (isPlaying) player.play()
+                
+                Timber.tag("MusicService").d("Immersive mode toggled to $enabled, reloaded $mediaId at $pos")
             }
         }
     }
@@ -1111,6 +1127,8 @@ class MusicService :
                 }
             }
         }
+        
+        startPearConnectSync()
     }
 
     private fun createExoPlayer(): ExoPlayer {
@@ -3033,6 +3051,7 @@ class MusicService :
             val nonNullPlayback = requireNotNull(playbackData) {
                 getString(R.string.error_unknown)
             }
+
             run {
                 val format = nonNullPlayback.format
                 val loudnessDb = nonNullPlayback.audioConfig?.loudnessDb
@@ -3071,7 +3090,14 @@ class MusicService :
 
                 songUrlCache[mediaId] =
                     streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
-                return@Factory dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
+                
+                val newSpec = dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
+                if (shouldBypassCache) {
+                    return@Factory newSpec.buildUpon()
+                        .setKey("${mediaId}_video")
+                        .build()
+                }
+                return@Factory newSpec
             }
         }
     }
@@ -3573,6 +3599,62 @@ class MusicService :
         isCrossfading = false
         applyEffectiveVolume()
         sleepTimer.notifySongTransition()
+    }
+
+    private fun startPearConnectSync() {
+        pearConnectSyncJob?.cancel()
+        pearConnectSyncJob = scope.launch {
+            // Observe remote commands
+            launch {
+                pearConnectClient.remotePlaybackCommands.collect { command ->
+                     if (pearConnectClient.desktopPlaybackState.value?.playbackTarget == "phone") {
+                         when (command) {
+                             RemoteCommand.PLAY -> player.play()
+                             RemoteCommand.PAUSE -> player.pause()
+                             RemoteCommand.NEXT -> player.seekToNext()
+                             RemoteCommand.PREVIOUS -> player.seekToPrevious()
+                             is RemoteCommand.SEEK -> player.seekTo(command.position)
+                             is RemoteCommand.SET_VOLUME -> playerVolume.value = command.volume / 100f
+                         }
+                     }
+                }
+            }
+            
+            // Periodically send our state
+            while (isActive) {
+                try {
+                    if (pearConnectClient.state.value == PearConnectState.CONNECTED &&
+                        pearConnectClient.desktopPlaybackState.value?.playbackTarget == "phone") {
+                        
+                        val currentMetadata = currentMediaMetadata.value
+                        val state = PlaybackStatePayload(
+                            isPlaying = player.isPlaying,
+                            currentTime = player.currentPosition.toDouble() / 1000.0,
+                            duration = (if (player.duration > 0) player.duration else 0L).toDouble() / 1000.0,
+                            volume = (playerVolume.value * 100).toDouble(),
+                            trackInfo = currentMetadata?.let { 
+                                 TrackInfo(
+                                     title = it.title,
+                                     artist = it.artists.joinToString { artist -> artist.name },
+                                     album = it.album?.title,
+                                     thumbnail = it.thumbnailUrl,
+                                     videoId = it.id,
+                                     duration = (if (it.duration > 0) it.duration else 0L).toDouble() / 1000.0
+                                 )
+                            },
+                            queuePosition = player.currentMediaItemIndex,
+                            queueLength = player.mediaItemCount,
+                            playbackTarget = "phone",
+                            timestamp = System.currentTimeMillis()
+                        )
+                        pearConnectClient.sendStateUpdate(state)
+                    }
+                } catch (e: Exception) {
+                    Timber.tag("MusicService").e(e, "Error in PearConnect sync")
+                }
+                delay(1000)
+            }
+        }
     }
 
     companion object {

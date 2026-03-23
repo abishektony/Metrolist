@@ -158,6 +158,8 @@ import com.metrolist.music.extensions.toEnum
 import com.metrolist.music.LocalPearConnectClient
 import com.metrolist.music.pearconnect.PearConnectState
 import com.metrolist.music.models.toMediaMetadata
+import com.metrolist.music.models.toTrackInfo
+import com.metrolist.music.extensions.metadata
 import com.metrolist.music.playback.DownloadUtil
 import com.metrolist.music.playback.MusicService
 import com.metrolist.music.playback.MusicService.MusicBinder
@@ -312,7 +314,7 @@ class MainActivity : ComponentActivity() {
                         val videoId = queue.preloadItem?.id 
                         if (videoId != null) {
                             Timber.i("PearConnect: Intercepted queue play, sending videoId=$videoId to desktop")
-                            pearConnectClient.playVideoOnDesktop(videoId)
+                            pearConnectClient.playVideoOnDesktop(videoId, queue.preloadItem?.toTrackInfo())
                         } else {
                             Timber.d("PearConnect: No preloadItem, fetching initial status to find videoId")
                             lifecycleScope.launch(Dispatchers.IO) {
@@ -321,7 +323,8 @@ class MainActivity : ComponentActivity() {
                                     val id = status.items.firstOrNull()?.mediaId
                                     if (id != null) {
                                         Timber.i("PearConnect: Found videoId=$id from initial status, sending to desktop")
-                                        pearConnectClient.playVideoOnDesktop(id)
+                                        val initialItem = status.items.firstOrNull()
+                                        pearConnectClient.playVideoOnDesktop(id, initialItem?.metadata?.toTrackInfo())
                                     } else {
                                         Timber.w("PearConnect: No items found in queue status")
                                     }
@@ -358,10 +361,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Probe/restore PearConnect socket every time the app comes to foreground
-        if (::pearConnectClient.isInitialized) {
-            pearConnectClient.reconnectIfNeeded()
-        }
+        // Removed automatic reconnect to PearConnect as requested
 
         // On Android 12+, we can't start foreground services from background
         // Use BIND_AUTO_CREATE which will create the service if needed

@@ -139,12 +139,14 @@ fun MiniPlayer(
     val isPearConnected = pearState == PearConnectState.CONNECTED
     val desktopPlaybackState by pearConnectClient?.desktopPlaybackState?.collectAsState()
         ?: remember { mutableStateOf(null) }
+    val playbackTarget = desktopPlaybackState?.playbackTarget ?: "laptop"
+    val isPearRemoteMode = isPearConnected && playbackTarget == "laptop"
 
     if (useNewMiniPlayerDesign) {
         NewMiniPlayer(
             progressState = progressState,
-            isPearConnected = isPearConnected,
-            desktopPlaybackState = desktopPlaybackState,
+            isPearConnected = isPearRemoteMode,
+            desktopPlaybackState = if (isPearRemoteMode) desktopPlaybackState else null,
             pearConnectClient = pearConnectClient,
             modifier = modifier
         )
@@ -152,8 +154,8 @@ fun MiniPlayer(
         Box(modifier = modifier.fillMaxWidth()) {
             LegacyMiniPlayer(
                 progressState = progressState,
-                isPearConnected = isPearConnected,
-                desktopPlaybackState = desktopPlaybackState,
+                isPearConnected = isPearRemoteMode,
+                desktopPlaybackState = if (isPearRemoteMode) desktopPlaybackState else null,
                 pearConnectClient = pearConnectClient,
                 modifier = Modifier.align(Alignment.Center)
             )
@@ -354,7 +356,7 @@ private fun NewMiniPlayer(
                                 .clip(CircleShape)
                                 .border(1.dp, outlineColor.copy(alpha = 0.3f), CircleShape)
                                 .clickable {
-                                    playerConnection.togglePlayPause()
+                                    pearConnectClient?.let { if (pearIsPlaying) it.pause() else it.play() }
                                 }
                         ) {
                             AsyncImage(
@@ -404,7 +406,7 @@ private fun NewMiniPlayer(
                     Spacer(modifier = Modifier.width(8.dp))
 
                     // Next button routes to desktop
-                    IconButton(onClick = { playerConnection.seekToNext() }, modifier = Modifier.size(40.dp)) {
+                    IconButton(onClick = { pearConnectClient?.next() }, modifier = Modifier.size(40.dp)) {
                         Icon(
                             painter = painterResource(R.drawable.skip_next),
                             contentDescription = "Next",

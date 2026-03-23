@@ -154,3 +154,12 @@ fun EpisodeItem.toMediaMetadata() =
         libraryAddToken = libraryAddToken,
         libraryRemoveToken = libraryRemoveToken,
     )
+fun MediaMetadata.toTrackInfo() =
+    com.metrolist.music.pearconnect.TrackInfo(
+        title = title,
+        artist = artists.joinToString { it.name },
+        album = album?.title,
+        thumbnail = thumbnailUrl,
+        videoId = id,
+        duration = (if (duration > 0) duration else 0).toDouble() / 1000.0
+    )

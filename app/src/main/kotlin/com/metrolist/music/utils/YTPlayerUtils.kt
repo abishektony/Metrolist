@@ -211,6 +211,14 @@ object YTPlayerUtils {
                     YouTube.player(videoId, playlistId, client, clientSigTimestamp, clientPoToken).getOrNull()
             }
 
+            // If we prefer video and this client is WEB_REMIX (main), check if it has any muxed formats.
+            // WEB_REMIX usually doesn't, so we should move to fallback clients immediately.
+            val hasMuxed = streamPlayerResponse?.streamingData?.formats?.any { it.width != null } == true
+            if (preferVideo && clientIndex == -1 && !hasMuxed) {
+                Timber.tag(logTag).d("MAIN_CLIENT has no muxed formats, skipping to fallback clients for video")
+                continue
+            }
+
             // process current client response
             if (streamPlayerResponse?.playabilityStatus?.status == "OK") {
                 Timber.tag(logTag).d("Player response status OK for client: ${if (clientIndex == -1) MAIN_CLIENT.clientName else STREAM_FALLBACK_CLIENTS[clientIndex].clientName}")
@@ -421,7 +429,10 @@ object YTPlayerUtils {
             }
 
         if (format != null) {
-            Timber.tag(logTag).d("Selected format: ${format.mimeType}, bitrate: ${format.bitrate}")
+            Timber.tag(logTag).d("Selected format: ${format.mimeType}, bitrate: ${format.bitrate}, width: ${format.width}, height: ${format.height}")
+            if (preferVideo && format.width == null) {
+                Timber.tag(logTag).w("Prefer video was true but selected format has no video!")
+            }
         } else {
             Timber.tag(logTag).d("No suitable audio format found")
         }

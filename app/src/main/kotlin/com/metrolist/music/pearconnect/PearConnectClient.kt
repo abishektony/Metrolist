@@ -17,15 +17,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.createSupabaseClient
@@ -83,8 +86,8 @@ class PearConnectClient @Inject constructor(
     private val _state = MutableStateFlow(PearConnectState.DISCONNECTED)
     val state: StateFlow<PearConnectState> = _state.asStateFlow()
 
-    private val _connectionMode = MutableStateFlow(PearConnectMode.AUTO)
-    val connectionMode: StateFlow<PearConnectMode> = _connectionMode.asStateFlow()
+    private val _connectionMode = MutableStateFlow(PearConnectMethod.AUTO)
+    val connectionMode: StateFlow<PearConnectMethod> = _connectionMode.asStateFlow()
 
     private val _discoveredDevices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<DiscoveredDevice>> = _discoveredDevices.asStateFlow()
@@ -97,6 +100,9 @@ class PearConnectClient @Inject constructor(
 
     private val _pairingCode = MutableStateFlow<String?>(null)
     val pairingCode: StateFlow<String?> = _pairingCode.asStateFlow()
+
+    private val _remotePlaybackCommands = MutableSharedFlow<RemoteCommand>(extraBufferCapacity = 64)
+    val remotePlaybackCommands = _remotePlaybackCommands.asSharedFlow()
     
     // Supabase
     private var supabaseClient: SupabaseClient? = null
@@ -112,7 +118,7 @@ class PearConnectClient @Inject constructor(
     init {
         scope.launch {
             val savedMode = context.dataStore.data.first()[PEAR_CONNECT_MODE_KEY]
-            _connectionMode.value = PearConnectMode.entries.find { it.name == savedMode } ?: PearConnectMode.AUTO
+            _connectionMode.value = PearConnectMethod.values().find { it.name == savedMode } ?: PearConnectMethod.AUTO
             
             initSupabase()
         }
@@ -130,7 +136,10 @@ class PearConnectClient @Inject constructor(
     
     private var currentConnectedDevice: DiscoveredDevice? = null
 
-    fun setConnectionMode(mode: PearConnectMode) {
+    // Rate limiting to prevent broadcast storm
+    private var lastDiscoveryTime = 0L
+
+    fun setConnectionMode(mode: PearConnectMethod) {
         _connectionMode.value = mode
         scope.launch {
             context.dataStore.edit { prefs ->
@@ -150,6 +159,13 @@ class PearConnectClient @Inject constructor(
             return
         }
         
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastDiscoveryTime < 5000L) {
+            Timber.d("PearConnect: Rate-limiting discovery to prevent network broadcast floods")
+            return
+        }
+        lastDiscoveryTime = currentTime
+
         _state.value = PearConnectState.DISCOVERING
         _discoveredDevices.value = emptyList()
 
@@ -259,50 +275,11 @@ class PearConnectClient @Inject constructor(
     private var lastPairingCode: String? = null
 
     private fun scheduleReconnect() {
-        if (isExplicitDisconnect) return
-        val ip = lastIp ?: return
-        val port = lastPort ?: return
-        
-        reconnectJob?.cancel()
-        reconnectJob = scope.launch {
-            kotlinx.coroutines.delay(5000)
-            val isConnected = _state.value == PearConnectState.CONNECTED
-            if (!isExplicitDisconnect && !isConnected) {
-                Timber.d("PearConnect: Attempting auto-reconnect...")
-                if (_state.value != PearConnectState.CONNECTED) {
-                    _state.value = PearConnectState.DISCONNECTED
-                }
-                connectWithQr(ip, port, lastPairingCode ?: "")
-            }
-        }
+        // Removed as per user request to stop auto-reconnect
     }
 
     fun reconnectIfNeeded() {
-        val currentMode = _connectionMode.value
-        if (_state.value == PearConnectState.CONNECTED) {
-            if (currentMode == PearConnectMode.LOCAL || currentMode == PearConnectMode.AUTO) {
-                if (webSocket == null) {
-                    _state.value = PearConnectState.DISCONNECTED
-                    scheduleReconnect()
-                }
-            }
-            if (currentMode == PearConnectMode.SUPABASE || currentMode == PearConnectMode.AUTO) {
-                if (supabaseChannel == null) {
-                    _state.value = PearConnectState.DISCONNECTED
-                    scheduleReconnect()
-                }
-            }
-        } else if (_state.value == PearConnectState.DISCONNECTED || _state.value == PearConnectState.ERROR) {
-            scope.launch {
-                val ip = lastIp ?: context.dataStore.data.first()[PEAR_CONNECT_IP_KEY]
-                val port = lastPort ?: context.dataStore.data.first()[PEAR_CONNECT_PORT_KEY]?.toIntOrNull()
-                val code = lastPairingCode ?: context.dataStore.data.first()[PEAR_CONNECT_CODE_KEY]
-                if (ip != null && port != null && code != null) {
-                    lastIp = ip; lastPort = port; lastPairingCode = code
-                    connectWithQr(ip, port, code)
-                }
-            }
-        }
+        // Removed as per user request to stop auto-reconnect
     }
 
     fun connectToDevice(device: DiscoveredDevice) {
@@ -322,15 +299,15 @@ class PearConnectClient @Inject constructor(
         stopDiscovery()
         
         val mode = _connectionMode.value
-        if (mode == PearConnectMode.SUPABASE || mode == PearConnectMode.AUTO) {
+        if (mode == PearConnectMethod.SUPABASE || mode == PearConnectMethod.AUTO) {
             initSupabaseChannel(pairingCode)
         }
         
-        if (mode == PearConnectMode.LOCAL || mode == PearConnectMode.AUTO) {
+        if (mode == PearConnectMethod.LOCAL || mode == PearConnectMethod.AUTO) {
             if (fallbackIp != null && fallbackIp != ip) {
                 performConnect(fallbackIp, fallbackPort ?: port, pairingCode, isFastAttempt = true) { success ->
                     if (!success) {
-                        if (mode == PearConnectMode.LOCAL) {
+                        if (mode == PearConnectMethod.LOCAL) {
                             performConnect(ip, port, pairingCode, isFastAttempt = false)
                         }
                     }
@@ -339,6 +316,15 @@ class PearConnectClient @Inject constructor(
                 performConnect(ip, port, pairingCode, isFastAttempt = false)
             }
         }
+    }
+
+    fun connectWithPin(pairingCode: String) {
+        if (_state.value == PearConnectState.CONNECTED || _state.value == PearConnectState.CONNECTING) return
+        _state.value = PearConnectState.CONNECTING
+        isExplicitDisconnect = false
+        reconnectJob?.cancel()
+        stopDiscovery()
+        initSupabaseChannel(pairingCode)
     }
 
     private fun initSupabaseChannel(pairingCode: String) {
@@ -371,7 +357,7 @@ class PearConnectClient @Inject constructor(
                 
                 Timber.i("PearConnect: Supabase channel joined for room-$pairingCode")
 
-                if (_connectionMode.value == PearConnectMode.SUPABASE || _connectionMode.value == PearConnectMode.AUTO) {
+                if (_connectionMode.value == PearConnectMethod.SUPABASE || _connectionMode.value == PearConnectMethod.AUTO) {
                     // Only send if we are trying to connect
                     if (_state.value == PearConnectState.CONNECTING || _state.value == PearConnectState.PAIRING || _state.value == PearConnectState.DISCONNECTED) {
                         Timber.d("PearConnect: Sending Supabase AUTH_REQUEST")
@@ -392,7 +378,9 @@ class PearConnectClient @Inject constructor(
     }
 
     private fun performConnect(ip: String, port: Int, pairingCode: String? = null, isFastAttempt: Boolean = false, onResult: ((Boolean) -> Unit)? = null) {
-        lastIp = ip; lastPort = port; if (pairingCode != null) lastPairingCode = pairingCode
+        lastIp = ip
+        lastPort = port
+        if (pairingCode != null) lastPairingCode = pairingCode
         isExplicitDisconnect = false
         scope.launch {
             context.dataStore.edit { prefs ->
@@ -433,7 +421,7 @@ class PearConnectClient @Inject constructor(
             }
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 this@PearConnectClient.webSocket = null
-                if (_connectionMode.value == PearConnectMode.LOCAL) {
+                if (_connectionMode.value == PearConnectMethod.LOCAL) {
                     _state.value = PearConnectState.DISCONNECTED
                     _desktopPlaybackState.value = null
                 }
@@ -443,7 +431,7 @@ class PearConnectClient @Inject constructor(
                 Timber.e(t, "PearConnect: WS connection failure")
                 if (this@PearConnectClient.webSocket === ws) this@PearConnectClient.webSocket = null
                 if (!hasNotifiedResult && onResult != null) { hasNotifiedResult = true; onResult.invoke(false) }
-                else if (_connectionMode.value == PearConnectMode.LOCAL) {
+                else if (_connectionMode.value == PearConnectMethod.LOCAL) {
                     _state.value = PearConnectState.ERROR
                     if (!isExplicitDisconnect) scheduleReconnect()
                 }
@@ -492,7 +480,9 @@ class PearConnectClient @Inject constructor(
                 "STATE_UPDATE" -> {
                     msg.payload?.let { 
                         try {
-                            _desktopPlaybackState.value = json.decodeFromJsonElement<PlaybackStatePayload>(it) 
+                            val state = json.decodeFromJsonElement<PlaybackStatePayload>(it)
+                            Timber.d("PearConnect: STATE_UPDATE received: ${state.trackInfo?.title} (${state.currentTime}/${state.duration})")
+                            _desktopPlaybackState.value = state
                         } catch (e: Exception) {
                             Timber.e(e, "PearConnect: Error parsing STATE_UPDATE")
                         }
@@ -501,11 +491,36 @@ class PearConnectClient @Inject constructor(
                 "QUEUE_UPDATE" -> {
                     msg.payload?.let { 
                         try { 
-                            _desktopQueue.value = json.decodeFromJsonElement<List<QueueItemPayload>>(it) 
+                            val queue = json.decodeFromJsonElement<List<QueueItemPayload>>(it)
+                            Timber.d("PearConnect: QUEUE_UPDATE received: ${queue.size} items")
+                            _desktopQueue.value = queue 
                         } catch (e: Exception) {
                             Timber.e(e, "PearConnect: Error parsing QUEUE_UPDATE")
                         } 
                     }
+                }
+                "DISCONNECT" -> {
+                    Timber.i("PearConnect: Server requested DISCONNECT")
+                    disconnect()
+                }
+                "PLAY" -> scope.launch { _remotePlaybackCommands.emit(RemoteCommand.PLAY) }
+                "PAUSE" -> scope.launch { _remotePlaybackCommands.emit(RemoteCommand.PAUSE) }
+                "NEXT" -> scope.launch { _remotePlaybackCommands.emit(RemoteCommand.NEXT) }
+                "PREVIOUS" -> scope.launch { _remotePlaybackCommands.emit(RemoteCommand.PREVIOUS) }
+                "SEEK" -> {
+                    val pos = (msg.payload as? JsonPrimitive)?.content?.toLongOrNull() 
+                        ?: (msg.payload as? JsonPrimitive)?.content?.toDoubleOrNull()?.toLong() ?: 0L
+                    scope.launch { _remotePlaybackCommands.emit(RemoteCommand.SEEK(pos)) }
+                }
+                "SET_VOLUME" -> {
+                    val vol = (msg.payload as? JsonPrimitive)?.content?.toIntOrNull() ?: 100
+                    scope.launch { _remotePlaybackCommands.emit(RemoteCommand.SET_VOLUME(vol)) }
+                }
+                "SET_PLAYBACK_TARGET" -> {
+                    val target = (msg.payload as? JsonPrimitive)?.content ?: "laptop"
+                    // If target is phone, we should start syncing our state to the server
+                    // This is handled by MusicService observing this state
+                    _desktopPlaybackState.value = _desktopPlaybackState.value?.copy(playbackTarget = target) ?: PlaybackStatePayload(playbackTarget = target)
                 }
             }
         } catch (e: Exception) {
@@ -518,13 +533,13 @@ class PearConnectClient @Inject constructor(
         val text = json.encodeToString(msg)
         val mode = _connectionMode.value
         
-        if (mode == PearConnectMode.LOCAL || mode == PearConnectMode.AUTO) {
+        if (mode == PearConnectMethod.LOCAL || mode == PearConnectMethod.AUTO) {
             val sent = webSocket?.send(text)
             if (sent == true) {
                 Timber.v("PearConnect: Sent WS message: $type")
-                if (mode == PearConnectMode.LOCAL) return
+                if (mode == PearConnectMethod.LOCAL) return
             }
-            if (sent == false && mode == PearConnectMode.LOCAL) {
+            if (sent == false && mode == PearConnectMethod.LOCAL) {
                 Timber.w("PearConnect: Failed to send WS message: $type")
                 webSocket = null; _state.value = PearConnectState.ERROR
                 if (!isExplicitDisconnect) scheduleReconnect()
@@ -532,7 +547,7 @@ class PearConnectClient @Inject constructor(
             }
         }
         
-        if (mode == PearConnectMode.SUPABASE || mode == PearConnectMode.AUTO) {
+        if (mode == PearConnectMethod.SUPABASE || mode == PearConnectMethod.AUTO) {
             scope.launch {
                 try {
                     supabaseChannel?.let { channel ->
@@ -594,12 +609,20 @@ class PearConnectClient @Inject constructor(
      * Tells the desktop to load and play a specific YouTube Music video by ID.
      * Used when the user picks a song on the phone while connected.
      */
-    fun playVideoOnDesktop(videoId: String) {
+    fun playVideoOnDesktop(videoId: String, trackInfo: TrackInfo? = null) {
         Timber.i("PearConnect: Requesting desktop playback of $videoId")
-        sendMessage(
-            "PLAY_VIDEO_ID",
-            kotlinx.serialization.json.JsonPrimitive(videoId)
-        )
+        if (trackInfo != null) {
+            val element = kotlinx.serialization.json.buildJsonObject {
+                put("videoId", kotlinx.serialization.json.JsonPrimitive(videoId))
+                put("trackInfo", json.encodeToJsonElement(TrackInfo.serializer(), trackInfo))
+            }
+            sendMessage("PLAY_VIDEO_ID", element)
+        } else {
+            sendMessage(
+                "PLAY_VIDEO_ID",
+                kotlinx.serialization.json.JsonPrimitive(videoId)
+            )
+        }
     }
 
     fun adjustVolume(delta: Int) {
@@ -609,4 +632,27 @@ class PearConnectClient @Inject constructor(
     }
 
     fun toggleImmersive() = sendMessage("TOGGLE_IMMERSIVE")
+    
+    fun sendStateUpdate(state: PlaybackStatePayload) {
+        val element = json.encodeToJsonElement(PlaybackStatePayload.serializer(), state)
+        sendMessage("STATE_UPDATE", element)
+    }
+
+    fun sendQueueUpdate(queue: List<QueueItemPayload>) {
+        val element = json.encodeToJsonElement(kotlinx.serialization.builtins.ListSerializer(QueueItemPayload.serializer()), queue)
+        sendMessage("QUEUE_UPDATE", element)
+    }
+    
+    fun setPlaybackTarget(target: String) {
+        sendMessage("SET_PLAYBACK_TARGET", JsonPrimitive(target))
+    }
+}
+
+sealed class RemoteCommand {
+    object PLAY : RemoteCommand()
+    object PAUSE : RemoteCommand()
+    object NEXT : RemoteCommand()
+    object PREVIOUS : RemoteCommand()
+    data class SEEK(val position: Long) : RemoteCommand()
+    data class SET_VOLUME(val volume: Int) : RemoteCommand()
 }

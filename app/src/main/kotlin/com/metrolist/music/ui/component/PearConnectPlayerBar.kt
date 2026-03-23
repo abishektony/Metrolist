@@ -59,11 +59,12 @@ fun PearConnectPlayerBar(
     val playbackState by pearConnectClient?.desktopPlaybackState?.collectAsState()
         ?: remember { mutableStateOf<PlaybackStatePayload?>(null) }
 
+    val currentState = playbackState // Capture for smart casting
     val isConnected = connectionState == PearConnectState.CONNECTED
-    val trackInfo = playbackState?.trackInfo
+    val trackInfo = currentState?.trackInfo
 
     AnimatedVisibility(
-        visible = isConnected && trackInfo != null,
+        visible = isConnected && trackInfo != null && (playbackState?.playbackTarget ?: "laptop") == "laptop",
         enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
         exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
         modifier = modifier
@@ -80,8 +81,26 @@ fun PearConnectPlayerBar(
             ) {
                 Column {
                     // Progress bar line at top
-                    val progress = if (playbackState!!.duration > 0)
-                        (playbackState!!.currentTime / playbackState!!.duration).toFloat().coerceIn(0f, 1f)
+                    // Interpolated progress logic
+                    var interpolatedTime by remember(currentState) { 
+                        mutableDoubleStateOf(currentState?.currentTime ?: 0.0) 
+                    }
+                    
+                    LaunchedEffect(currentState?.isPlaying, currentState?.timestamp) {
+                        if (currentState != null && currentState.isPlaying && currentState.timestamp > 0) {
+                            val baseTime = currentState.currentTime
+                            val desktopTimestamp = currentState.timestamp
+                            val duration = currentState.duration
+                            while (true) {
+                                val latencyAdjustedElapsed = (System.currentTimeMillis() - desktopTimestamp) / 1000.0
+                                interpolatedTime = (baseTime + latencyAdjustedElapsed).coerceAtMost(duration)
+                                delay(250)
+                            }
+                        }
+                    }
+
+                    val progress = if (currentState != null && currentState.duration > 0)
+                        (interpolatedTime / currentState.duration).toFloat().coerceIn(0f, 1f)
                     else 0f
 
                     LinearProgressIndicator(
@@ -147,7 +166,7 @@ fun PearConnectPlayerBar(
                         // Simple play/pause control
                         IconButton(
                             onClick = {
-                                if (playbackState?.isPlaying == true) {
+                                if (currentState?.isPlaying == true) {
                                     pearConnectClient?.pause()
                                 } else {
                                     pearConnectClient?.play()
@@ -157,10 +176,10 @@ fun PearConnectPlayerBar(
                         ) {
                             Icon(
                                 painter = painterResource(
-                                    if (playbackState?.isPlaying == true) R.drawable.pause
+                                    if (currentState?.isPlaying == true) R.drawable.pause
                                     else R.drawable.play
                                 ),
-                                contentDescription = if (playbackState?.isPlaying == true) "Pause" else "Play",
+                                contentDescription = if (currentState?.isPlaying == true) "Pause" else "Play",
                                 tint = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.size(24.dp)
                             )
@@ -201,10 +220,28 @@ fun PearConnectExpandedPlayer(
     val queue by pearConnectClient?.desktopQueue?.collectAsState()
         ?: remember { mutableStateOf<List<QueueItemPayload>>(emptyList()) }
 
-    val trackInfo = playbackState?.trackInfo
+    val currentState = playbackState // Capture for smart casting
+    val trackInfo = currentState?.trackInfo
 
-    val progress = if (playbackState != null && playbackState!!.duration > 0)
-        (playbackState!!.currentTime / playbackState!!.duration).toFloat().coerceIn(0f, 1f)
+    var interpolatedTime by remember(currentState) { 
+        mutableDoubleStateOf(currentState?.currentTime ?: 0.0) 
+    }
+    
+    LaunchedEffect(currentState?.isPlaying, currentState?.timestamp) {
+        if (currentState != null && currentState.isPlaying && currentState.timestamp > 0) {
+            val baseTime = currentState.currentTime
+            val desktopTimestamp = currentState.timestamp
+            val duration = currentState.duration
+            while (true) {
+                val latencyAdjustedElapsed = (System.currentTimeMillis() - desktopTimestamp) / 1000.0
+                interpolatedTime = (baseTime + latencyAdjustedElapsed).coerceAtMost(duration)
+                delay(250)
+            }
+        }
+    }
+
+    val progress = if (currentState != null && currentState.duration > 0)
+        (interpolatedTime / currentState.duration).toFloat().coerceIn(0f, 1f)
     else 0f
 
     Scaffold(
@@ -329,7 +366,7 @@ fun PearConnectExpandedPlayer(
                 Slider(
                     value = progress,
                     onValueChange = { newVal ->
-                        val seekPosition = (newVal * playbackState!!.duration).toLong()
+                        val seekPosition = (newVal * currentState!!.duration).toLong()
                         pearConnectClient?.seekTo(seekPosition)
                     },
                     colors = SliderDefaults.colors(
@@ -343,12 +380,12 @@ fun PearConnectExpandedPlayer(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        formatDuration(playbackState?.currentTime?.toLong() ?: 0),
+                        formatDuration(interpolatedTime.toLong()),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        formatDuration(playbackState?.duration?.toLong() ?: 0),
+                        formatDuration(currentState?.duration?.toLong() ?: 0),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -376,7 +413,7 @@ fun PearConnectExpandedPlayer(
 
                     FilledIconButton(
                         onClick = {
-                            if (playbackState?.isPlaying == true) {
+                            if (currentState?.isPlaying == true) {
                                 pearConnectClient?.pause()
                             } else {
                                 pearConnectClient?.play()
@@ -391,10 +428,10 @@ fun PearConnectExpandedPlayer(
                     ) {
                         Icon(
                             painter = painterResource(
-                                if (playbackState?.isPlaying == true) R.drawable.pause
+                                if (currentState?.isPlaying == true) R.drawable.pause
                                 else R.drawable.play
                             ),
-                            contentDescription = if (playbackState?.isPlaying == true) "Pause" else "Play",
+                            contentDescription = if (currentState?.isPlaying == true) "Pause" else "Play",
                             modifier = Modifier.size(32.dp)
                         )
                     }
@@ -426,7 +463,7 @@ fun PearConnectExpandedPlayer(
                         modifier = Modifier.size(20.dp)
                     )
                     Slider(
-                        value = ((playbackState?.volume ?: 100.0) / 100.0).toFloat().coerceIn(0f, 1f),
+                        value = ((currentState?.volume ?: 100.0) / 100.0).toFloat().coerceIn(0f, 1f),
                         onValueChange = { pearConnectClient?.setVolume(it) },
                         modifier = Modifier
                             .weight(1f)
@@ -437,7 +474,7 @@ fun PearConnectExpandedPlayer(
                         )
                     )
                     Text(
-                        "${((playbackState?.volume ?: 100.0)).toInt()}%",
+                        "${((currentState?.volume ?: 100.0)).toInt()}%",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -519,7 +556,7 @@ fun PearConnectExpandedPlayer(
                 Spacer(Modifier.height(24.dp))
 
                 val videoId = trackInfo?.videoId?.takeIf { it.isNotBlank() }
-                val seekMs = ((playbackState?.currentTime ?: 0.0) * 1000).toLong()
+                val seekMs = (interpolatedTime * 1000).toLong()
 
                 OutlinedButton(
                     onClick = {
@@ -703,9 +740,26 @@ fun PearExpandedControls(
 
         Spacer(Modifier.height(24.dp))
 
-        // Progress
+        // Interpolated time indicators
+        var interpolatedTime by remember(desktopPlaybackState) { 
+            mutableDoubleStateOf(desktopPlaybackState.currentTime) 
+        }
+        
+        LaunchedEffect(desktopPlaybackState.isPlaying, desktopPlaybackState.timestamp) {
+            if (desktopPlaybackState.isPlaying && desktopPlaybackState.timestamp > 0) {
+                val baseTime = desktopPlaybackState.currentTime
+                val desktopTimestamp = desktopPlaybackState.timestamp
+                val duration = desktopPlaybackState.duration
+                while (true) {
+                    val latencyAdjustedElapsed = (System.currentTimeMillis() - desktopTimestamp) / 1000.0
+                    interpolatedTime = (baseTime + latencyAdjustedElapsed).coerceAtMost(duration)
+                    delay(250)
+                }
+            }
+        }
+
         val progressPercent = if (desktopPlaybackState.duration > 0)
-            (desktopPlaybackState.currentTime.toFloat() / desktopPlaybackState.duration.toFloat()).coerceIn(0f, 1f)
+            (interpolatedTime.toFloat() / desktopPlaybackState.duration.toFloat()).coerceIn(0f, 1f)
         else 0f
 
         Slider(
@@ -732,7 +786,7 @@ fun PearExpandedControls(
                 .padding(horizontal = 32.dp)
         ) {
             Text(
-                text = formatDuration(desktopPlaybackState.currentTime.toLong()),
+                text = formatDuration(interpolatedTime.toLong()),
                 style = MaterialTheme.typography.labelMedium,
                 color = TextBackgroundColor
             )

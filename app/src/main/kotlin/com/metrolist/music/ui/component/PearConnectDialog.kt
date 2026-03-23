@@ -25,7 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
-import com.metrolist.music.pearconnect.PearConnectMode
+import com.metrolist.music.pearconnect.PearConnectMethod
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType as KbType
@@ -79,7 +79,7 @@ fun PearConnectDialog(
                 )
             },
             text = {
-                val currentMode by pearConnectClient?.connectionMode?.collectAsState(initial = PearConnectMode.AUTO) ?: androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(PearConnectMode.AUTO) }
+                val currentMode by pearConnectClient?.connectionMode?.collectAsState(initial = PearConnectMethod.AUTO) ?: androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(PearConnectMethod.AUTO) }
 
                 Column {
                     // Mode Selection
@@ -93,7 +93,7 @@ fun PearConnectDialog(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        PearConnectMode.entries.forEach { mode ->
+                        PearConnectMethod.entries.forEach { mode ->
                             FilterChip(
                                 selected = currentMode == mode,
                                 onClick = { pearConnectClient?.setConnectionMode(mode) },
@@ -117,10 +117,45 @@ fun PearConnectDialog(
 
                     when {
                         isConnected -> {
-                            Text(
-                                "You are connected to Pear Desktop.",
-                                style = MaterialTheme.typography.bodyLarge
-                            )
+                            val playbackState by pearConnectClient?.desktopPlaybackState?.collectAsState() ?: androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(null) }
+                            val currentTarget = playbackState?.playbackTarget ?: "laptop"
+
+                            Column {
+                                Text(
+                                    "You are connected to Pear Desktop.",
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Spacer(Modifier.height(16.dp))
+                                
+                                Text(
+                                    "Playback Target",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    listOf("laptop" to "Desktop", "phone" to "Phone").forEach { (target, label) ->
+                                        FilterChip(
+                                            selected = currentTarget == target,
+                                            onClick = { pearConnectClient?.setPlaybackTarget(target) },
+                                            label = { Text(label) },
+                                            leadingIcon = if (currentTarget == target) {
+                                                {
+                                                    Icon(
+                                                        painter = painterResource(R.drawable.check),
+                                                        contentDescription = null,
+                                                        modifier = Modifier.height(18.dp)
+                                                    )
+                                                }
+                                            } else null
+                                        )
+                                    }
+                                }
+                            }
                         }
                         isConnecting || isPairing -> {
                             Text(
@@ -147,6 +182,11 @@ fun PearConnectDialog(
                                 onDiscover = {
                                     pearConnectClient?.disconnect() // Stop previous attempt
                                     pearConnectClient?.startDiscovery()
+                                },
+                                pin = pearConnectPin,
+                                onPinChange = onPinChange,
+                                onPinConnect = {
+                                    pearConnectClient?.connectWithPin(it)
                                 }
                             )
                         }
@@ -165,6 +205,11 @@ fun PearConnectDialog(
                                 },
                                 onDiscover = {
                                     pearConnectClient?.startDiscovery()
+                                },
+                                pin = pearConnectPin,
+                                onPinChange = onPinChange,
+                                onPinConnect = {
+                                    pearConnectClient?.connectWithPin(it)
                                 }
                             )
                         }
@@ -181,6 +226,11 @@ fun PearConnectDialog(
                                 },
                                 onDiscover = {
                                     pearConnectClient?.startDiscovery()
+                                },
+                                pin = pearConnectPin,
+                                onPinChange = onPinChange,
+                                onPinConnect = {
+                                    pearConnectClient?.connectWithPin(it)
                                 }
                             )
                         }
@@ -219,7 +269,10 @@ fun PearConnectDialog(
 @Composable
 private fun ConnectionMethodButtons(
     onScanQr: () -> Unit,
-    onDiscover: () -> Unit
+    onDiscover: () -> Unit,
+    pin: String,
+    onPinChange: (String) -> Unit,
+    onPinConnect: (String) -> Unit
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -244,7 +297,37 @@ private fun ConnectionMethodButtons(
             Text("  Scan QR Code  (Recommended)")
         }
 
-        // Secondary: NSD discovery
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        
+        Text(
+            "Or enter pairing code manually:",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = pin,
+                onValueChange = onPinChange,
+                modifier = Modifier.weight(1f),
+                label = { Text("6-Digit Code") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            )
+            
+            androidx.compose.material3.Button(
+                onClick = { onPinConnect(pin) },
+                enabled = pin.length >= 6
+            ) {
+                Text("Connect")
+            }
+        }
+
+        // Tertiary: NSD discovery
         TextButton(
             onClick = onDiscover,
             modifier = Modifier.fillMaxWidth()

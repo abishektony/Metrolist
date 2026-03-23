@@ -16,4 +16,8 @@
     <style name="Theme.Widget.Metrolist" parent="@android:style/Theme.DeviceDefault.DayNight">
         <item name="android:colorBackground">#E6E1E5</item>
     </style>
+
+    <style name="PlayerViewTexture" parent="">
+        <item name="surface_type">texture_view</item>
+    </style>
 </resources>

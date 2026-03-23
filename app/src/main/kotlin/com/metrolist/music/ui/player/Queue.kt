@@ -98,6 +98,9 @@ import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder
+import com.metrolist.music.models.toTrackInfo
+import com.metrolist.music.extensions.metadata
+import com.metrolist.music.models.MediaMetadata
 import androidx.navigation.NavController
 import com.metrolist.music.LocalListenTogetherManager
 import com.metrolist.music.LocalPlayerConnection
@@ -108,11 +111,9 @@ import com.metrolist.music.constants.QueueEditLockKey
 import com.metrolist.music.constants.SleepTimerFadeOutKey
 import com.metrolist.music.constants.UseNewPlayerDesignKey
 import com.metrolist.music.constants.SleepTimerStopAfterCurrentSongKey
-import com.metrolist.music.extensions.metadata
 import com.metrolist.music.extensions.move
 import com.metrolist.music.extensions.toggleRepeatMode
 import com.metrolist.music.listentogether.RoomRole
-import com.metrolist.music.models.MediaMetadata
 import com.metrolist.music.ui.component.ActionPromptDialog
 import com.metrolist.music.ui.component.BottomSheet
 import com.metrolist.music.ui.component.BottomSheetState
@@ -911,7 +912,7 @@ fun Queue(
                                                         }
                                                     } else {
                                                         if (isPearConnected) {
-                                                            pearConnectClient?.playVideoOnDesktop(window.mediaItem.mediaId)
+                                                            pearConnectClient?.playVideoOnDesktop(window.mediaItem.mediaId, window.mediaItem.metadata?.toTrackInfo())
                                                         } else if (isCasting) {
                                                             val mediaId = window.mediaItem.mediaId
                                                             val navigated = castHandler?.navigateToMediaIfInQueue(mediaId) ?: false
