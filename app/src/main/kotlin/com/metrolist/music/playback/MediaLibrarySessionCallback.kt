@@ -115,6 +115,27 @@ constructor(
         return SettableFuture.create<MediaItemsWithStartPosition>()
     }
 
+    override fun onAddMediaItems(
+        mediaSession: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        mediaItems: MutableList<MediaItem>
+    ): ListenableFuture<MutableList<MediaItem>> {
+        val searchQuery = mediaItems.firstOrNull()?.requestMetadata?.searchQuery
+        if (searchQuery != null) {
+            return scope.future(Dispatchers.IO) {
+                val result = YouTube.search(searchQuery, YouTube.SearchFilter.FILTER_SONG).getOrNull()
+                val songs = result?.items?.filterIsInstance<SongItem>()
+                val firstSong = songs?.firstOrNull()
+                if (firstSong != null) {
+                    mutableListOf(firstSong.toMediaItem())
+                } else {
+                    mutableListOf()
+                }
+            }
+        }
+        return super.onAddMediaItems(mediaSession, controller, mediaItems)
+    }
+
     override fun onGetLibraryRoot(
         session: MediaLibrarySession,
         browser: MediaSession.ControllerInfo,
