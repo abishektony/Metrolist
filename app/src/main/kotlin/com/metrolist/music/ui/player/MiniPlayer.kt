@@ -441,16 +441,9 @@ private fun NewMiniPlayer(
 
                     Spacer(modifier = Modifier.width(12.dp))
                     
-                    // Cast indicator
-                    if (isCasting) {
-                        Icon(
-                            painter = painterResource(R.drawable.cast_connected),
-                            contentDescription = "Casting",
-                            tint = primaryColor,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                    }
+                    // Google Cast Button
+                    com.metrolist.music.cast.CastButton(modifier = Modifier.size(32.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
 
                     // Subscribe button - isolated composable
                     mediaMetadata?.artists?.firstOrNull()?.id?.let { artistId ->

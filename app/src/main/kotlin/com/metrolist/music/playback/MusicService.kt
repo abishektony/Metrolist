@@ -3268,6 +3268,7 @@ class MusicService :
             // Ignore
         }
         audioManager.unregisterAudioDeviceCallback(audioDeviceCallback)
+        localMediaServer?.stop()
         castConnectionHandler?.release()
         if (dataStore.get(PersistentQueueKey, true)) {
             saveQueueToDisk()
@@ -3408,12 +3409,23 @@ class MusicService :
         }
     }
 
+    private var localMediaServer: com.metrolist.music.cast.LocalMediaServer? = null
+
     /**
      * Initialize Google Cast support
      */
     private fun initializeCast() {
         if (dataStore.get(com.metrolist.music.constants.EnableGoogleCastKey, true)) {
             try {
+                // Initialize the local media server for casting local files
+                localMediaServer = com.metrolist.music.cast.LocalMediaServer(
+                    context = this,
+                    playerCache = playerCache,
+                    downloadCache = downloadCache
+                )
+                localMediaServer?.start()
+                timber.log.Timber.d("LocalMediaServer started for Cast")
+
                 castConnectionHandler = CastConnectionHandler(this, scope, this)
                 castConnectionHandler?.initialize()
                 timber.log.Timber.d("Google Cast initialized")

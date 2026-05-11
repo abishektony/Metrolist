@@ -311,4 +311,7 @@ dependencies {
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
     implementation(libs.zxing.core)
+
+    // Local HTTP Server for Casting
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 }
