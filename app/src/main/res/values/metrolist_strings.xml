@@ -536,6 +536,9 @@
     <string name="widget_music_player">Music Player</string>
     <string name="widget_turntable">Turntable</string>
 
+    <!-- Quick Settings tile -->
+    <string name="qs_tile_music_recognizer">Music Recognizer</string>
+
     <!-- Music Recognizer Widget strings -->
     <string name="widget_recognizer_name">Music Recognizer</string>
     <string name="widget_recognizer_description">Identify songs playing around you directly from your home screen</string>

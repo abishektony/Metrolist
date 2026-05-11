@@ -6,6 +6,17 @@ val localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
     localProperties.load(localPropertiesFile.inputStream())
 }
+
+val baseApplicationId = "com.metrolist.music.abi"
+val applicationIdOverride = System.getenv("METROLIST_APPLICATION_ID")?.takeIf { it.isNotBlank() }
+val appNameOverride = System.getenv("METROLIST_APP_NAME")?.takeIf { it.isNotBlank() }
+val debugKeystorePathOverride = System.getenv("METROLIST_DEBUG_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+val debugKeystorePassword = System.getenv("METROLIST_DEBUG_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() } ?: "android"
+val debugKeyAlias = System.getenv("METROLIST_DEBUG_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "androiddebugkey"
+val debugKeyPassword = System.getenv("METROLIST_DEBUG_KEY_PASSWORD")?.takeIf { it.isNotBlank() } ?: "android"
+val persistentDebugKeystoreFile = file("persistent-debug.keystore")
+val workflowDebugKeystoreFile = debugKeystorePathOverride?.let(::file)
+
 plugins {
     id("com.android.application")
     alias(libs.plugins.hilt)
@@ -19,11 +30,12 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.metrolist.music"
+        applicationId = applicationIdOverride ?: baseApplicationId
         minSdk = 26
         targetSdk = 36
-        versionCode = 142
-        versionName = "13.2.1"
+        versionCode = 143
+        versionName = "13.3.0"
+        resValue("string", "app_name", appNameOverride ?: "abi music")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -44,27 +56,55 @@ android {
             dimension = "variant"
             isDefault = true
             buildConfigField("Boolean", "CAST_AVAILABLE", "false")
+            buildConfigField("Boolean", "UPDATER_AVAILABLE", "true")
         }
 
         // GMS variant - with Google Cast support (requires Google Play Services)
         create("gms") {
             dimension = "variant"
             buildConfigField("Boolean", "CAST_AVAILABLE", "true")
+            buildConfigField("Boolean", "UPDATER_AVAILABLE", "true")
+        }
+
+        // IzzyOnDroid variant - no Google Cast, no built-in updater (store handles updates)
+        create("izzy") {
+            dimension = "variant"
+            buildConfigField("Boolean", "CAST_AVAILABLE", "false")
+            buildConfigField("Boolean", "UPDATER_AVAILABLE", "false")
         }
     }
 
     signingConfigs {
         create("persistentDebug") {
-            storeFile = file("persistent-debug.keystore")
+            storeFile = persistentDebugKeystoreFile
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        create("workflowDebug") {
+            storeFile = workflowDebugKeystoreFile ?: persistentDebugKeystoreFile
+            storePassword = debugKeystorePassword
+            keyAlias = debugKeyAlias
+            keyPassword = debugKeyPassword
+        }
         create("release") {
-            storeFile = file("keystore/release.keystore")
-            storePassword = System.getenv("STORE_PASSWORD")
-            keyAlias = System.getenv("KEY_ALIAS")
-            keyPassword = System.getenv("KEY_PASSWORD")
+            val releaseKeystoreFile = file("keystore/release.keystore")
+            val storePass = System.getenv("STORE_PASSWORD")
+            val keyAls = System.getenv("KEY_ALIAS")
+            val keyPass = System.getenv("KEY_PASSWORD")
+            if (releaseKeystoreFile.exists() && storePass != null && keyAls != null && keyPass != null) {
+                storeFile = releaseKeystoreFile
+                storePassword = storePass
+                keyAlias = keyAls
+                keyPassword = keyPass
+            } else {
+                // Fallback for local release builds: use persistent debug keystore
+                // This produces com.metrolist.music (no .debug suffix) for Android Auto testing
+                storeFile = persistentDebugKeystoreFile
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
         getByName("debug") {
             keyAlias = "androiddebugkey"
@@ -80,19 +120,28 @@ android {
             isShrinkResources = true
             isCrunchPngs = false
             isDebuggable = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
+                "proguard-rules.pro",
             )
         }
         debug {
-            applicationIdSuffix = ".debug"
-            isDebuggable = true
-            signingConfig = if (System.getenv("GITHUB_EVENT_NAME") == "pull_request") {
-                signingConfigs.getByName("debug")
-            } else {
-                signingConfigs.getByName("persistentDebug")
+            if (applicationIdOverride == null) {
+                applicationIdSuffix = ".debug"
             }
+            isDebuggable = true
+            if (appNameOverride == null) {
+                resValue("string", "app_name", "Metrolist Debug")
+            }
+            signingConfig =
+                if (workflowDebugKeystoreFile != null) {
+                    signingConfigs.getByName("workflowDebug")
+                } else if (persistentDebugKeystoreFile.exists()) {
+                    signingConfigs.getByName("persistentDebug")
+                } else {
+                    signingConfigs.getByName("debug")
+                }
         }
     }
 
@@ -113,6 +162,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        resValues = true
     }
 
     dependenciesInfo {
@@ -134,10 +184,11 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
-            keepDebugSymbols += listOf(
-                "**/libandroidx.graphics.path.so",
-                "**/libdatastore_shared_counter.so"
-            )
+            keepDebugSymbols +=
+                listOf(
+                    "**/libandroidx.graphics.path.so",
+                    "**/libdatastore_shared_counter.so",
+                )
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -157,10 +208,20 @@ ksp {
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     compilerOptions {
         freeCompilerArgs.addAll(
-            "-opt-in=kotlin.RequiresOptIn"
+            "-opt-in=kotlin.RequiresOptIn",
         )
         suppressWarnings.set(false)
     }
+}
+
+// Android provides org.json as a platform API (/apex/com.android.art/javalib/core-libart.jar).
+// The standalone org.json:json artefact bundles an older Apache Harmony copy of JSONArray that
+// contains an internal `myArrayList` field absent from the platform class.  Without obfuscation
+// R8 inlines against this internal field; at runtime the platform class is resolved instead,
+// producing a NoSuchFieldError.  Excluding the artefact globally ensures only the platform
+// class is ever referenced.
+configurations.configureEach {
+    exclude(group = "org.json", module = "json")
 }
 
 dependencies {
