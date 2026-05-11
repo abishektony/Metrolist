@@ -33,8 +33,8 @@ android {
         applicationId = applicationIdOverride ?: baseApplicationId
         minSdk = 26
         targetSdk = 36
-        versionCode = 143
-        versionName = "13.3.0"
+        versionCode = 144
+        versionName = "13.4.0"
         resValue("string", "app_name", appNameOverride ?: "abi music")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -98,9 +98,13 @@ android {
                 keyAlias = keyAls
                 keyPassword = keyPass
             } else {
-                // Fallback for local release builds: use persistent debug keystore
-                // This produces com.metrolist.music (no .debug suffix) for Android Auto testing
-                storeFile = persistentDebugKeystoreFile
+                // Fallback for local release builds: use persistent debug keystore if it exists
+                // Otherwise use the standard debug keystore (for CI environments)
+                if (persistentDebugKeystoreFile.exists()) {
+                    storeFile = persistentDebugKeystoreFile
+                } else {
+                    storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+                }
                 storePassword = "android"
                 keyAlias = "androiddebugkey"
                 keyPassword = "android"
