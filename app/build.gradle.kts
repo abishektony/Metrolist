@@ -98,13 +98,9 @@ android {
                 keyAlias = keyAls
                 keyPassword = keyPass
             } else {
-                // Fallback for local release builds: use persistent debug keystore if it exists
-                // Otherwise use the standard debug keystore (for CI environments)
-                if (persistentDebugKeystoreFile.exists()) {
-                    storeFile = persistentDebugKeystoreFile
-                } else {
-                    storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
-                }
+                // Fallback for local release builds: use persistent debug keystore
+                // This produces com.metrolist.music (no .debug suffix) for Android Auto testing
+                storeFile = persistentDebugKeystoreFile
                 storePassword = "android"
                 keyAlias = "androiddebugkey"
                 keyPassword = "android"
@@ -124,7 +120,9 @@ android {
             isShrinkResources = true
             isCrunchPngs = false
             isDebuggable = false
-            signingConfig = signingConfigs.getByName("release")
+            val isCi = System.getenv("GITHUB_ACTIONS") == "true"
+            val hasReleaseKey = System.getenv("STORE_PASSWORD") != null
+            signingConfig = if (isCi && !hasReleaseKey) null else signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
