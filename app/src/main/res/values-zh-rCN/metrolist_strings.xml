@@ -644,7 +644,7 @@
     <string name="lyrics_provider_priority_desc">拖动以按偏好重新排序提供商。位置越高 -&gt; 优先级越高。</string>
     <string name="changelog">更新日志</string>
     <string name="changelog_empty">暂无更新日志</string>
-    <string name="github_releases_url">https://github.com/MetrolistGroup/Metrolist/releases</string>
+    <string name="github_releases_url">https://github.com/abishektony/Metrolist/releases</string>
     <string name="list_bullet">•</string>
     <string name="n_seconds">%d 秒</string>
     <string name="n_percent">%d%%</string>

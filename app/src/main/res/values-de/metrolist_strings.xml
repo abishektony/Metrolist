@@ -658,7 +658,7 @@
     <string name="n_percent">%d %%</string>
     <string name="changelog">Änderungsprotokoll</string>
     <string name="changelog_empty">Kein Änderungsprotokoll verfügbar</string>
-    <string name="github_releases_url">https://github.com/MetrolistGroup/Metrolist/releases</string>
+    <string name="github_releases_url">https://github.com/abishektony/Metrolist/releases</string>
     <string name="list_bullet">•</string>
     <string name="view_on_github">Auf GitHub anzeigen</string>
     <string name="current_version">Version in Nutzung</string>
