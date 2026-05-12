@@ -179,13 +179,22 @@ jobs:
       - name: Generate release notes
         run: |
           echo "Generating release notes..."
-
+          VERSION_CODE="${{ needs.check-version.outputs.version_code }}"
+          CHANGELOG_FILE="fastlane/metadata/android/en-US/changelogs/${VERSION_CODE}.txt"
+          
           cat > release_notes.md << EOF
-          Release of version ${{ needs.check-version.outputs.new_version }}
-
-          $(git log $(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~10")..HEAD --pretty=format:"- %s" --no-merges | head -10 || echo "- Initial release")
+          Release of version ${{ needs.check-version.outputs.new_version }} (Code: ${VERSION_CODE})
+          
           EOF
-
+          
+          if [ -f "$CHANGELOG_FILE" ]; then
+            echo "Using changelog from $CHANGELOG_FILE"
+            cat "$CHANGELOG_FILE" >> release_notes.md
+          else
+            echo "Changelog file not found, falling back to git log"
+            git log $(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~10")..HEAD --pretty=format:"- %s" --no-merges | head -10 >> release_notes.md
+          fi
+          
           echo "Release notes preview:"
           cat release_notes.md
 

@@ -1,0 +1,5 @@
+- Added full Google Cast (Chromecast) support for streaming to TVs.
+- Implemented a local HTTP server to serve cached and downloaded media to Cast devices.
+- Added an interactive Cast button to the MiniPlayer (GMS variant).
+- Fixed various build and signing issues in GitHub Actions.
+- Improved stability of local media streaming.
