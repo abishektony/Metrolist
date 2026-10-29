@@ -150,6 +150,8 @@ import com.metrolist.music.db.MusicDatabase
 import com.metrolist.music.db.entities.Event
 import com.metrolist.music.db.entities.FormatEntity
 import com.metrolist.music.db.entities.LyricsEntity
+import com.metrolist.music.lyrics.LyricsUtils
+import kotlinx.coroutines.isActive
 import com.metrolist.music.db.entities.RelatedSongMap
 import com.metrolist.music.db.entities.Song
 import com.metrolist.music.di.DownloadCache
@@ -467,6 +469,10 @@ class MusicService :
         if (immersiveModeEnabled.value != enabled) {
             immersiveModeEnabled.value = enabled
             
+            if (!enabled) {
+                player.clearVideoSurface()
+            }
+            
             // Toggle on desktop if connected
             if (pearConnectClient.state.value == com.metrolist.music.pearconnect.PearConnectState.CONNECTED) {
                 pearConnectClient.toggleImmersive()
@@ -479,13 +485,24 @@ class MusicService :
                 val index = player.currentMediaItemIndex
                 val isPlaying = player.isPlaying
                 
-                // Mark for bypass so it gets a fresh YT stream (with video if enabled)
+                // Clear URL cache and mark for bypass so fresh stream is resolved
+                songUrlCache.remove(mediaId)
+                songUrlCache.remove("${mediaId}_video")
+                songUrlCache.remove("${mediaId}_audio")
+                try {
+                    playerCache.removeResource(mediaId)
+                } catch (_: Exception) {}
                 bypassCacheForQualityChange.add(mediaId)
                 
-                // Rebuild the media item to ensure ExoPlayer re-evaluates it (especially track selection)
-                val newMediaItem = mediaItem.buildUpon().build()
+                // Build a distinct URI so ExoPlayer recognizes the item needs a new MediaSource
+                val modeUri = mediaId.toUri().buildUpon()
+                    .appendQueryParameter("mode", if (enabled) "video" else "audio")
+                    .appendQueryParameter("t", System.currentTimeMillis().toString())
+                    .build()
+                val newMediaItem = mediaItem.buildUpon()
+                    .setUri(modeUri)
+                    .build()
                 
-                // Re-set the media item to force a new resolution and source creation
                 player.replaceMediaItem(index, newMediaItem)
                 player.seekTo(index, pos)
                 player.prepare()
@@ -508,7 +525,11 @@ class MusicService :
             dataStore.edit { settings ->
                 settings[PlayerModeKey] = newMode
             }
+            withContext(Dispatchers.Main) {
+                setImmersiveMode(newMode == PlayerMode.VIDEO.name)
+            }
             Timber.tag(SERVICE_TAG).d("Player mode toggled to $newMode via custom command")
+            updateNotification()
         }
     }
 
@@ -1059,14 +1080,14 @@ class MusicService :
 
         combine(
             currentMediaMetadata.distinctUntilChangedBy { it?.id },
-            dataStore.data.map { it[ShowLyricsKey] ?: false }.distinctUntilChanged(),
+            dataStore.data.map { it[ShowLyricsKey] ?: true }.distinctUntilChanged(),
         ) { mediaMetadata, showLyrics ->
             mediaMetadata to showLyrics
         }.collectLatest(scope) { (mediaMetadata, showLyrics) ->
             if (mediaMetadata == null) return@collectLatest
             
             var lyricsEntity = database.lyrics(mediaMetadata.id).first()
-            if (showLyrics && lyricsEntity == null) {
+            if (lyricsEntity == null) {
                 val lyricsWithProvider = lyricsHelper.getLyrics(mediaMetadata)
                 val newEntity = LyricsEntity(
                     id = mediaMetadata.id,
@@ -1079,16 +1100,59 @@ class MusicService :
                 lyricsEntity = newEntity
             }
             
-            // Expose lyrics to media session extras
-            val currentItem = player.currentMediaItem
-            if (currentItem != null && currentItem.mediaId == mediaMetadata.id) {
-                val currentExtras = currentItem.mediaMetadata.extras ?: Bundle()
-                val lyricsText = lyricsEntity?.lyrics ?: ""
-                if (currentExtras.getString("lyrics") != lyricsText) {
+            val lyricsText = lyricsEntity?.lyrics ?: ""
+            val baseArtist = mediaMetadata.artists.joinToString { it.name }
+
+            val parsedLyrics = if (lyricsText.isNotBlank()) {
+                LyricsUtils.parseLyrics(lyricsText)
+            } else emptyList()
+
+            val hasSync = parsedLyrics.any { it.time > 0 }
+
+            if (showLyrics && parsedLyrics.isNotEmpty()) {
+                var lastSyncedLine = ""
+                while (coroutineContext.isActive) {
+                    val currentPos = player.currentPosition
+                    val currentLine = if (hasSync) {
+                        val lineIdx = LyricsUtils.findCurrentLineIndex(parsedLyrics, currentPos)
+                        parsedLyrics.getOrNull(lineIdx)?.text?.trim().orEmpty()
+                    } else {
+                        parsedLyrics.firstOrNull()?.text?.trim().orEmpty()
+                    }
+
+                    if (currentLine != lastSyncedLine) {
+                        lastSyncedLine = currentLine
+                        val currentItem = player.currentMediaItem
+                        if (currentItem != null && currentItem.mediaId == mediaMetadata.id) {
+                            val displaySubtitle = if (currentLine.isNotBlank()) " $currentLine" else baseArtist
+                            val currentExtras = currentItem.mediaMetadata.extras ?: Bundle()
+                            val updatedExtras = Bundle(currentExtras).apply {
+                                putString("lyrics", lyricsText)
+                            }
+                            val updatedMetadata = currentItem.mediaMetadata.buildUpon()
+                                .setSubtitle(displaySubtitle)
+                                .setDescription(currentLine.ifBlank { baseArtist })
+                                .setExtras(updatedExtras)
+                                .build()
+                            val newMediaItem = currentItem.buildUpon()
+                                .setMediaMetadata(updatedMetadata)
+                                .build()
+                            val currentIndex = player.currentMediaItemIndex
+                            player.replaceMediaItem(currentIndex, newMediaItem)
+                        }
+                    }
+                    delay(500)
+                }
+            } else {
+                val currentItem = player.currentMediaItem
+                if (currentItem != null && currentItem.mediaId == mediaMetadata.id) {
+                    val currentExtras = currentItem.mediaMetadata.extras ?: Bundle()
                     val updatedExtras = Bundle(currentExtras).apply {
                         putString("lyrics", lyricsText)
                     }
                     val updatedMetadata = currentItem.mediaMetadata.buildUpon()
+                        .setSubtitle(baseArtist)
+                        .setDescription(baseArtist)
                         .setExtras(updatedExtras)
                         .build()
                     val newMediaItem = currentItem.buildUpon()
@@ -1096,7 +1160,6 @@ class MusicService :
                         .build()
                     val currentIndex = player.currentMediaItemIndex
                     player.replaceMediaItem(currentIndex, newMediaItem)
-                    Timber.tag("MusicService").d("Updated media item extras with lyrics for ${mediaMetadata.id}")
                 }
             }
         }
@@ -3022,27 +3085,29 @@ class MusicService :
                 return@Factory dataSpec
             }
 
-            // Check if we need to bypass cache for quality change
+            // Check if we need to bypass cache for quality or mode change
             val shouldBypassCache = bypassCacheForQualityChange.contains(mediaId)
+            val isVideoMode = immersiveModeEnabled.value
+            val cacheKey = if (isVideoMode) "${mediaId}_video" else "${mediaId}_audio"
 
             if (!shouldBypassCache) {
-                if (downloadCache.isCached(
+                if (!isVideoMode && (downloadCache.isCached(
                         mediaId,
                         dataSpec.position,
                         if (dataSpec.length >= 0) dataSpec.length else 1
                     ) ||
-                    playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH)
+                    playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH))
                 ) {
                     scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
                     return@Factory dataSpec
                 }
 
-                songUrlCache[mediaId]?.takeIf { it.second > System.currentTimeMillis() }?.let {
+                songUrlCache[cacheKey]?.takeIf { it.second > System.currentTimeMillis() }?.let {
                     scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
                     return@Factory dataSpec.withUri(it.first.toUri())
                 }
             } else {
-                Timber.tag("MusicService").i("BYPASSING CACHE for $mediaId due to quality change")
+                Timber.tag("MusicService").i("BYPASSING CACHE for $mediaId due to quality/mode change")
             }
 
             Timber.tag("MusicService").i("FETCHING STREAM: $mediaId | quality=$audioQuality")
@@ -3142,10 +3207,10 @@ class MusicService :
                             id = mediaId,
                             itag = format.itag,
                             mimeType = format.mimeType.split(";")[0],
-                            codecs = format.mimeType.split("codecs=")[1].removeSurrounding("\""),
+                            codecs = format.mimeType.split("codecs=").getOrNull(1)?.removeSurrounding("\"")?.removeSurrounding("'") ?: "",
                             bitrate = format.bitrate,
                             sampleRate = format.audioSampleRate,
-                            contentLength = format.contentLength!!,
+                            contentLength = format.contentLength ?: 0L,
                             loudnessDb = loudnessDb,
                             perceptualLoudnessDb = perceptualLoudnessDb,
                             playbackUrl = nonNullPlayback.playbackTracking?.videostatsPlaybackUrl?.baseUrl
@@ -3161,7 +3226,7 @@ class MusicService :
 
                 val streamUrl = nonNullPlayback.streamUrl
 
-                songUrlCache[mediaId] =
+                songUrlCache[cacheKey] =
                     streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
                 
                 val newSpec = dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
@@ -3754,6 +3819,7 @@ class MusicService :
         const val ALBUM = "album"
         const val PLAYLIST = "playlist"
         const val YOUTUBE_PLAYLIST = "youtube_playlist"
+        const val LYRICS = "lyrics"
         const val SEARCH = "search"
         const val SHUFFLE_ACTION = "__shuffle__"
 

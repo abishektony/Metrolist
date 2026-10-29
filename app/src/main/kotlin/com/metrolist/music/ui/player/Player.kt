@@ -303,8 +303,9 @@ fun BottomSheetPlayer(
     LaunchedEffect(playerMode) {
         when (playerMode) {
             PlayerMode.VIDEO -> {
-                // Always show the video panel in VIDEO mode
-                showInlineLyrics = true
+                if (!userOpenedLyrics) {
+                    showInlineLyrics = false
+                }
             }
             PlayerMode.SONG -> {
                 // Only close panel if the user didn't manually open lyrics
@@ -1493,6 +1494,10 @@ fun BottomSheetPlayer(
                 ) {
                     // Mode toggle — only in portrait, non-fullscreen
                     if (!isFullScreen && !isLandscape) {
+                        val hasVideoAvailable = !mediaMetadata?.id.isNullOrBlank() &&
+                            !mediaMetadata.id.startsWith("radio:") &&
+                            !mediaMetadata.id.startsWith("local:") &&
+                            !mediaMetadata.id.startsWith("content://")
                         PlayerModeToggle(
                             currentMode = playerMode,
                             onModeChange = { newMode ->
@@ -1504,8 +1509,7 @@ fun BottomSheetPlayer(
                                 }
                                 onPlayerModeChange(newMode)
                             },
-                            hasVideo = mediaMetadata?.isVideoSong == true ||
-                                mediaMetadata?.setVideoId != null,
+                            hasVideo = hasVideoAvailable,
                             textColor = TextBackgroundColor,
                         )
                     }
@@ -1637,6 +1641,11 @@ fun VideoSurface(
     player: Player,
     modifier: Modifier = Modifier,
 ) {
+    DisposableEffect(player) {
+        onDispose {
+            player.clearVideoSurface()
+        }
+    }
     AndroidView(
         factory = { context ->
             androidx.media3.ui.PlayerView(
@@ -1652,6 +1661,9 @@ fun VideoSurface(
         update = { view ->
             // Re-attach player in case it changed (service restart, etc.)
             if (view.player != player) view.player = player
+        },
+        onRelease = { view ->
+            view.player = null
         }
     )
 }

@@ -118,7 +118,7 @@ fun PearConnectPlayerBar(
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
-                        // 🍐 Desktop indicator
+                        // Desktop indicator
                         Box(
                             modifier = Modifier
                                 .size(6.dp)
@@ -291,7 +291,7 @@ fun PearConnectExpandedPlayer(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        "🍐",
+                        "PearConnect",
                         fontSize = 48.sp
                     )
                     Spacer(Modifier.height(16.dp))

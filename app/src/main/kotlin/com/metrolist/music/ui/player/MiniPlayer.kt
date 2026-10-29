@@ -394,7 +394,7 @@ private fun NewMiniPlayer(
                             modifier = Modifier.basicMarquee(iterations = 1, initialDelayMillis = 3000, velocity = 30.dp)
                         )
                         Text(
-                            text = pearTrack.artist + " • 🍐",
+                            text = pearTrack.artist + " • PearConnect",
                             color = onSurfaceColor.copy(alpha = 0.7f),
                             fontSize = 12.sp,
                             maxLines = 1,
@@ -801,7 +801,7 @@ private fun LegacyMiniPlayer(
                         Spacer(Modifier.width(8.dp))
                         Column {
                             Text(text = pearTrack.title, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-                            Text(text = pearTrack.artist + " • 🍐", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(text = pearTrack.artist + " • PearConnect", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }

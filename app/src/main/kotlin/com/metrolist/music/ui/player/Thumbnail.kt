@@ -567,9 +567,7 @@ private fun ThumbnailItem(
                     },
                     onTap = {
                         if (isListenTogetherGuest) return@detectTapGestures
-                        val videoType = item.mediaMetadata.extras?.getString("videoType")
-                        val videoId = item.mediaMetadata.extras?.getString("videoId")
-                        val hasVideo = (videoType != null && videoType != "MUSIC_VIDEO_TYPE_ATV") || videoId != null
+                        val hasVideo = !item.mediaId.startsWith("radio:") && item.mediaId.isNotBlank()
                         
                         // Simple cycle: SONG -> VIDEO (if has video) -> FULLSCREEN -> SONG
                         when (playerMode) {
@@ -606,6 +604,9 @@ private fun ThumbnailItem(
                     },
                     update = { view ->
                         view.player = player
+                    },
+                    onRelease = { view ->
+                        view.player = null
                     },
                     modifier = Modifier.fillMaxSize()
                 )

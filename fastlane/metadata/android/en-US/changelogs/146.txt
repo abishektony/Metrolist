@@ -1,0 +1,7 @@
+- Added Radio station browsing and search powered by the Radio Browser API (search by name, country, city, and tags).
+- Fixed YouTube Music playback failures by resolving missing stream expiration times and prioritizing unthrottled streaming clients.
+- Fixed Video mode playback and seamless switching between Video and Song audio modes without player freeze.
+- Fixed player view collapsing/dismissing when rotating device between portrait and landscape orientations.
+- Added real-time synchronized lyrics support to Android Auto Now Playing screen and browseable Lyrics folder with tap-to-seek.
+- Prevented potential crashes when audio formats omit contentLength or codecs metadata.
+- Polished PearConnect UI and connection displays.

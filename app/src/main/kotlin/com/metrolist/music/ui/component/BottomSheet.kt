@@ -327,22 +327,31 @@ fun rememberBottomSheetState(
     var previousAnchor by rememberSaveable {
         mutableIntStateOf(initialAnchor)
     }
-    val animatable = remember {
-        Animatable(0.dp, Dp.VectorConverter)
+
+    val targetValue = when (previousAnchor) {
+        expandedAnchor -> expandedBound
+        collapsedAnchor -> collapsedBound
+        dismissedAnchor -> dismissedBound
+        else -> dismissedBound
     }
 
-    return remember(dismissedBound, expandedBound, collapsedBound, coroutineScope) {
-        val initialValue = when (previousAnchor) {
+    val animatable = remember {
+        Animatable(targetValue, Dp.VectorConverter)
+    }
+
+    androidx.compose.runtime.LaunchedEffect(dismissedBound, expandedBound, collapsedBound) {
+        animatable.updateBounds(dismissedBound.coerceAtMost(expandedBound), expandedBound)
+        val currentTarget = when (previousAnchor) {
             expandedAnchor -> expandedBound
             collapsedAnchor -> collapsedBound
             dismissedAnchor -> dismissedBound
-            else -> error("Unknown BottomSheet anchor")
+            else -> collapsedBound
         }
+        animatable.snapTo(currentTarget)
+    }
 
+    return remember(dismissedBound, expandedBound, collapsedBound, coroutineScope) {
         animatable.updateBounds(dismissedBound.coerceAtMost(expandedBound), expandedBound)
-        coroutineScope.launch {
-            animatable.animateTo(initialValue, NavigationBarAnimationSpec)
-        }
 
         BottomSheetState(
             draggableState = DraggableState { delta ->

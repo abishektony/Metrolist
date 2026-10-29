@@ -373,7 +373,7 @@ fun QrScannerScreen(
                 color = Color.White.copy(alpha = 0.10f)
             ) {
                 Text(
-                    "Open Pear Desktop → click the 🍐 button\nto show the QR code",
+                    "Open Pear Desktop → click the PearConnect button\nto show the QR code",
                     color = Color.White.copy(alpha = 0.65f),
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,

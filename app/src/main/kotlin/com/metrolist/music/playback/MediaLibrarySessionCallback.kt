@@ -49,9 +49,12 @@ import com.metrolist.music.utils.dataStore
 import com.metrolist.music.utils.get
 import com.metrolist.music.utils.reportException
 import dagger.hilt.android.qualifiers.ApplicationContext
+import android.text.format.DateUtils
+import com.metrolist.music.lyrics.LyricsUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -129,6 +132,14 @@ constructor(
         controller: MediaSession.ControllerInfo,
         mediaItems: MutableList<MediaItem>
     ): ListenableFuture<MutableList<MediaItem>> {
+        val firstItem = mediaItems.firstOrNull()
+        if (firstItem?.mediaId?.startsWith("lyrics_seek_") == true) {
+            val timeMs = firstItem.mediaId.removePrefix("lyrics_seek_").toLongOrNull() ?: 0L
+            scope.launch(Dispatchers.Main) {
+                mediaSession.player.seekTo(timeMs)
+            }
+            return Futures.immediateFuture(mutableListOf())
+        }
         val searchQuery = mediaItems.firstOrNull()?.requestMetadata?.searchQuery
         if (searchQuery != null) {
             return scope.future(Dispatchers.IO) {
@@ -214,6 +225,13 @@ constructor(
                                 null,
                                 drawableUri(R.drawable.queue_music),
                                 MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS,
+                            ),
+                            browsableMediaItem(
+                                MusicService.LYRICS,
+                                context.getString(R.string.lyrics),
+                                null,
+                                drawableUri(R.drawable.lyrics),
+                                MediaMetadata.MEDIA_TYPE_FOLDER_MIXED,
                             ),
                         )
 
@@ -343,6 +361,46 @@ constructor(
 
                     MusicService.FORGOTTEN_FAVORITES -> database.forgottenFavorites().first()
                         .map { it.toMediaItem(parentId) }
+
+                    MusicService.LYRICS -> {
+                        val currentMedia = service.player.currentMediaItem
+                        val mediaId = currentMedia?.mediaId
+                        if (mediaId != null) {
+                            val lyricsEntity = database.lyrics(mediaId).first()
+                            if (lyricsEntity != null && lyricsEntity.lyrics.isNotBlank()) {
+                                val parsed = LyricsUtils.parseLyrics(lyricsEntity.lyrics)
+                                parsed.map { entry ->
+                                    MediaItem.Builder()
+                                        .setMediaId("lyrics_seek_${entry.time}")
+                                        .setMediaMetadata(
+                                            MediaMetadata.Builder()
+                                                .setTitle(entry.text.ifBlank { "..." })
+                                                .setSubtitle(if (entry.time > 0) DateUtils.formatElapsedTime(entry.time / 1000) else null)
+                                                .setIsPlayable(true)
+                                                .setIsBrowsable(false)
+                                                .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                                                .build()
+                                        )
+                                        .build()
+                                }
+                            } else {
+                                listOf(
+                                    MediaItem.Builder()
+                                        .setMediaId("lyrics_none")
+                                        .setMediaMetadata(
+                                            MediaMetadata.Builder()
+                                                .setTitle(context.getString(R.string.lyrics_not_found))
+                                                .setIsPlayable(false)
+                                                .setIsBrowsable(false)
+                                                .build()
+                                        )
+                                        .build()
+                                )
+                            }
+                        } else {
+                            emptyList()
+                        }
+                    }
 
                     else ->
                         when {
