@@ -84,6 +84,7 @@ import com.metrolist.music.listentogether.RoomRole
 import com.metrolist.music.ui.component.CastButton
 import com.metrolist.music.utils.rememberEnumPreference
 import com.metrolist.music.utils.rememberPreference
+import com.metrolist.music.constants.PlayerMode
 import kotlinx.coroutines.delay
 
 /**
@@ -201,6 +202,10 @@ fun Thumbnail(
     isPlayerExpanded: () -> Boolean = { true },
     isLandscape: Boolean = false,
     isListenTogetherGuest: Boolean = false,
+    playerMode: PlayerMode = PlayerMode.SONG,
+    onPlayerModeChange: (PlayerMode) -> Unit = {},
+    onToggleFullScreen: () -> Unit = {},
+    isFullScreen: Boolean = false,
 ) {
     val playerConnection = LocalPlayerConnection.current ?: return
     val context = LocalContext.current
@@ -402,7 +407,11 @@ fun Thumbnail(
                                 isLandscape = isLandscape,
                                 isListenTogetherGuest = isListenTogetherGuest,
                                 currentMediaId = mediaMetadata?.id,
-                                currentMediaThumbnail = mediaMetadata?.thumbnailUrl
+                                currentMediaThumbnail = mediaMetadata?.thumbnailUrl,
+                                playerMode = playerMode,
+                                onPlayerModeChange = onPlayerModeChange,
+                                onToggleFullScreen = onToggleFullScreen,
+                                isFullScreen = isFullScreen
                             )
                         }
                     }
@@ -500,8 +509,13 @@ private fun ThumbnailItem(
     isListenTogetherGuest: Boolean = false,
     currentMediaId: String? = null,
     currentMediaThumbnail: String? = null,
+    playerMode: PlayerMode = PlayerMode.SONG,
+    onPlayerModeChange: (PlayerMode) -> Unit = {},
+    onToggleFullScreen: () -> Unit = {},
+    isFullScreen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
+    val player = playerConnection.player
     val incrementalSeekSkipEnabled by rememberPreference(SeekExtraSeconds, defaultValue = false)
     var skipMultiplier by remember { mutableIntStateOf(1) }
     var lastTapTime by remember { mutableLongStateOf(0L) }
@@ -550,6 +564,24 @@ private fun ThumbnailItem(
                             playerConnection.player.seekTo((currentPosition + skipAmount).coerceAtMost(duration))
                             onSeek(context.getString(R.string.seek_forward_dynamic, skipAmount / 1000), true)
                         }
+                    },
+                    onTap = {
+                        if (isListenTogetherGuest) return@detectTapGestures
+                        val videoType = item.mediaMetadata.extras?.getString("videoType")
+                        val videoId = item.mediaMetadata.extras?.getString("videoId")
+                        val hasVideo = (videoType != null && videoType != "MUSIC_VIDEO_TYPE_ATV") || videoId != null
+                        
+                        // Simple cycle: SONG -> VIDEO (if has video) -> FULLSCREEN -> SONG
+                        when (playerMode) {
+                            PlayerMode.SONG -> {
+                                if (hasVideo) {
+                                    onPlayerModeChange(PlayerMode.VIDEO)
+                                }
+                            }
+                            PlayerMode.VIDEO -> {
+                                onToggleFullScreen()
+                            }
+                        }
                     }
                 )
             },
@@ -562,6 +594,21 @@ private fun ThumbnailItem(
         ) {
             if (hidePlayerThumbnail) {
                 HiddenThumbnailPlaceholder(textBackgroundColor = textBackgroundColor)
+            } else if (playerMode == PlayerMode.VIDEO && item.mediaId == currentMediaId && !isFullScreen) {
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        androidx.media3.ui.PlayerView(android.view.ContextThemeWrapper(ctx, R.style.PlayerViewTexture)).apply {
+                            useController = false
+                            this.player = player
+                            resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                        }
+                    },
+                    update = { view ->
+                        view.player = player
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
             } else {
                 val artworkUriToUse = if (item.mediaId == currentMediaId && !currentMediaThumbnail.isNullOrBlank()) {
                     currentMediaThumbnail

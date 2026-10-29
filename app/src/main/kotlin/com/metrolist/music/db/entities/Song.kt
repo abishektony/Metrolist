@@ -47,6 +47,12 @@ constructor(
         entityColumn = "id"
     )
     val format: FormatEntity? = null,
+
+    @Relation(
+        parentColumn = "id",
+        entityColumn = "videoId"
+    )
+    val setVideoId: SetVideoIdEntity? = null,
 ) : LocalItem() {
     override val id: String
         get() = song.id

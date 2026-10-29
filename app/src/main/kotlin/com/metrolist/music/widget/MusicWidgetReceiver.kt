@@ -12,6 +12,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import com.metrolist.music.playback.MusicService
+import com.metrolist.music.playback.isMusicServiceRunning
 
 class MusicWidgetReceiver : AppWidgetProvider() {
 
@@ -22,7 +23,7 @@ class MusicWidgetReceiver : AppWidgetProvider() {
     ) {
         // Only trigger update through MusicService if it's already running
         // This prevents BackgroundServiceStartNotAllowedException on Android 14+
-        if (MusicService.isRunning) {
+        if (isMusicServiceRunning) {
             val intent = Intent(context, MusicService::class.java).apply {
                 action = ACTION_UPDATE_WIDGET
             }
@@ -43,7 +44,7 @@ class MusicWidgetReceiver : AppWidgetProvider() {
     ) {
         super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
         // Trigger widget update when size changes
-        if (MusicService.isRunning) {
+        if (isMusicServiceRunning) {
             val intent = Intent(context, MusicService::class.java).apply {
                 action = ACTION_UPDATE_WIDGET
             }

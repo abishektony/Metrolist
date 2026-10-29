@@ -563,6 +563,7 @@ fun AppearanceSettings(
                 when (it) {
                     NavigationTab.HOME -> stringResource(R.string.home)
                     NavigationTab.SEARCH -> stringResource(R.string.search)
+                    NavigationTab.RADIO -> stringResource(R.string.radio)
                     NavigationTab.LIBRARY -> stringResource(R.string.filter_library)
                 }
             }
@@ -1368,6 +1369,7 @@ fun AppearanceSettings(
                             when (defaultOpenTab) {
                                 NavigationTab.HOME -> stringResource(R.string.home)
                                 NavigationTab.SEARCH -> stringResource(R.string.search)
+                                NavigationTab.RADIO -> stringResource(R.string.radio)
                                 NavigationTab.LIBRARY -> stringResource(R.string.filter_library)
                             }
                         )
@@ -1631,6 +1633,7 @@ enum class DarkMode {
 enum class NavigationTab {
     HOME,
     SEARCH,
+    RADIO,
     LIBRARY,
 }
 

@@ -77,6 +77,7 @@ import com.metrolist.music.db.entities.Album
 import com.metrolist.music.db.entities.SpeedDialItem
 import com.metrolist.music.db.entities.Song
 import com.metrolist.music.extensions.toMediaItem
+import com.metrolist.music.playback.MusicService
 import com.metrolist.music.playback.ExoDownloadService
 import com.metrolist.music.playback.queues.ListQueue
 import com.metrolist.music.ui.component.AlbumListItem
@@ -340,7 +341,7 @@ fun AlbumMenu(
                                 onDismiss()
                                 if (songs.isNotEmpty()) {
                                     album.album.playlistId?.let { playlistId ->
-                                        playerConnection.service.getAutomix(playlistId)
+                                        playerConnection.getAutomix(playlistId)
                                     }
                                     playerConnection.playQueue(
                                         ListQueue(

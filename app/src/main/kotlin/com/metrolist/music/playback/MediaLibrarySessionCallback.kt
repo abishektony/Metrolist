@@ -23,6 +23,7 @@ import androidx.media3.session.MediaSession.MediaItemsWithStartPosition
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
+import androidx.media3.session.CommandButton
 import coil3.imageLoader
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
@@ -70,12 +71,16 @@ constructor(
     var toggleLike: () -> Unit = {}
     var toggleStartRadio: () -> Unit = {}
     var toggleLibrary: () -> Unit = {}
+    var togglePlayerMode: () -> Unit = {}
+    var toggleLyrics: () -> Unit = {}
 
     override fun onConnect(
         session: MediaSession,
         controller: MediaSession.ControllerInfo,
     ): MediaSession.ConnectionResult {
         val connectionResult = super.onConnect(session, controller)
+        service.updateSessionCustomLayout()
+
         return MediaSession.ConnectionResult.accept(
             connectionResult.availableSessionCommands
                 .buildUpon()
@@ -84,6 +89,8 @@ constructor(
                 .add(MediaSessionConstants.CommandToggleLibrary)
                 .add(MediaSessionConstants.CommandToggleShuffle)
                 .add(MediaSessionConstants.CommandToggleRepeatMode)
+                .add(MediaSessionConstants.CommandTogglePlayerMode)
+                .add(MediaSessionConstants.CommandToggleLyrics)
                 .build(),
             connectionResult.availablePlayerCommands,
         )
@@ -103,6 +110,8 @@ constructor(
                 !session.player.shuffleModeEnabled
 
             MediaSessionConstants.ACTION_TOGGLE_REPEAT_MODE -> session.player.toggleRepeatMode()
+            MediaSessionConstants.ACTION_TOGGLE_PLAYER_MODE -> togglePlayerMode()
+            MediaSessionConstants.ACTION_TOGGLE_LYRICS -> toggleLyrics()
         }
         return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
     }

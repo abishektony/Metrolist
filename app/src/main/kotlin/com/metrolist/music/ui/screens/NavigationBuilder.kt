@@ -94,6 +94,10 @@ fun NavGraphBuilder.navigationBuilder(
         )
     }
 
+    composable(Screens.Radio.route) {
+        RadioScreen(navController = navController)
+    }
+
     composable(Screens.Library.route) {
         LibraryScreen(navController)
     }

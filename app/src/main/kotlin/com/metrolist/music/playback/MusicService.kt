@@ -28,6 +28,7 @@ import android.media.audiofx.LoudnessEnhancer
 import android.net.ConnectivityManager
 import android.os.Binder
 import android.os.Build
+import android.os.Bundle
 import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
 import androidx.core.net.toUri
@@ -66,8 +67,10 @@ import androidx.media3.exoplayer.audio.SilenceSkippingAudioProcessor
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder
 import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.mp4.FragmentedMp4Extractor
+import androidx.media3.extractor.mp4.Mp4Extractor
 import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaController
@@ -111,6 +114,7 @@ import com.metrolist.music.constants.HideExplicitKey
 import com.metrolist.music.constants.HideVideoSongsKey
 import com.metrolist.music.constants.HistoryDuration
 import com.metrolist.music.constants.LastFMUseNowPlaying
+import com.metrolist.music.constants.MediaSessionConstants
 import com.metrolist.music.constants.MediaSessionConstants.CommandToggleLike
 import com.metrolist.music.constants.MediaSessionConstants.CommandToggleRepeatMode
 import com.metrolist.music.constants.MediaSessionConstants.CommandToggleShuffle
@@ -119,6 +123,8 @@ import com.metrolist.music.constants.PauseListenHistoryKey
 import com.metrolist.music.constants.PauseOnMute
 import com.metrolist.music.constants.PersistentQueueKey
 import com.metrolist.music.constants.PersistentShuffleAcrossQueuesKey
+import com.metrolist.music.constants.PlayerMode
+import com.metrolist.music.constants.PlayerModeKey
 import com.metrolist.music.constants.PlayerVolumeKey
 import com.metrolist.music.constants.RememberShuffleAndRepeatKey
 import com.metrolist.music.constants.RepeatModeKey
@@ -310,6 +316,124 @@ class MusicService :
 
     lateinit var playerVolume: MutableStateFlow<Float>
     val isMuted = MutableStateFlow(false)
+
+    fun addToQueue(items: List<MediaItem>) {
+        // Remove duplicates if enabled
+        if (dataStore.get(PreventDuplicateTracksInQueueKey, false)) {
+            val itemIds = items.map { it.mediaId }.toSet()
+            val indicesToRemove = mutableListOf<Int>()
+            val currentIndex = player.currentMediaItemIndex
+
+            for (i in 0 until player.mediaItemCount) {
+                if (i != currentIndex && player.getMediaItemAt(i).mediaId in itemIds) {
+                    indicesToRemove.add(i)
+                }
+            }
+
+            // Remove from highest index to lowest to maintain index stability
+            indicesToRemove.sortedDescending().forEach { index ->
+                player.removeMediaItem(index)
+            }
+        }
+
+        player.addMediaItems(items)
+        if (player.shuffleModeEnabled) {
+            val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
+            applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
+        }
+        player.prepare()
+    }
+
+    fun playNext(items: List<MediaItem>) {
+        // If queue is empty or player is idle, play immediately instead
+        if (player.mediaItemCount == 0 || player.playbackState == STATE_IDLE) {
+            player.setMediaItems(items)
+            player.prepare()
+            // Don't start local playback if casting
+            if (castConnectionHandler?.isCasting?.value != true) {
+                player.play()
+            }
+            return
+        }
+
+        // Remove duplicates if enabled
+        if (dataStore.get(PreventDuplicateTracksInQueueKey, false)) {
+            val itemIds = items.map { it.mediaId }.toSet()
+            val indicesToRemove = mutableListOf<Int>()
+            val currentIndex = player.currentMediaItemIndex
+
+            for (i in 0 until player.mediaItemCount) {
+                if (i != currentIndex && player.getMediaItemAt(i).mediaId in itemIds) {
+                    indicesToRemove.add(i)
+                }
+            }
+
+            // Remove from highest index to lowest to maintain index stability
+            indicesToRemove.sortedDescending().forEach { index ->
+                player.removeMediaItem(index)
+            }
+        }
+
+        val insertIndex = player.currentMediaItemIndex + 1
+        val shuffleEnabled = player.shuffleModeEnabled
+
+        // Insert items immediately after the current item in the window/index space
+        player.addMediaItems(insertIndex, items)
+        player.prepare()
+
+        if (shuffleEnabled) {
+            // Rebuild shuffle order so that newly inserted items are played next
+            val timeline = player.currentTimeline
+            if (!timeline.isEmpty) {
+                val size = timeline.windowCount
+                val currentIndex = player.currentMediaItemIndex
+
+                // Newly inserted indices are a contiguous range [insertIndex, insertIndex + items.size)
+                val newIndices = (insertIndex until (insertIndex + items.size)).toSet()
+
+                // Collect existing shuffle traversal order excluding current index
+                val orderAfter = mutableListOf<Int>()
+                var idx = currentIndex
+                while (true) {
+                    idx = timeline.getNextWindowIndex(idx, Player.REPEAT_MODE_OFF, /*shuffleModeEnabled=*/true)
+                    if (idx == C.INDEX_UNSET) break
+                    if (idx != currentIndex) orderAfter.add(idx)
+                }
+
+                val prevList = mutableListOf<Int>()
+                var pIdx = currentIndex
+                while (true) {
+                    pIdx = timeline.getPreviousWindowIndex(pIdx, Player.REPEAT_MODE_OFF, /*shuffleModeEnabled=*/true)
+                    if (pIdx == C.INDEX_UNSET) break
+                    if (pIdx != currentIndex) prevList.add(pIdx)
+                }
+                prevList.reverse() // preserve original forward order
+
+                val existingOrder = (prevList + orderAfter).filter { it != currentIndex && it !in newIndices }
+
+                // Build new shuffle order: current -> newly inserted (in insertion order) -> rest
+                val nextBlock = (insertIndex until (insertIndex + items.size)).toList()
+                val finalOrder = IntArray(size)
+                var pos = 0
+                finalOrder[pos++] = currentIndex
+                nextBlock.forEach { if (it in 0 until size) finalOrder[pos++] = it }
+                existingOrder.forEach { if (pos < size) finalOrder[pos++] = it }
+
+                // Fill any missing indices (safety) to ensure a full permutation
+                if (pos < size) {
+                    for (i in 0 until size) {
+                        if (!finalOrder.contains(i)) {
+                            finalOrder[pos++] = i
+                            if (pos == size) break
+                        }
+                    }
+                }
+
+                player.setShuffleOrder(DefaultShuffleOrder(finalOrder, System.currentTimeMillis()))
+            }
+        }
+    }
+
     private val sleepTimerVolumeMultiplier = MutableStateFlow(1f)
     private val audioFocusVolumeMultiplier = MutableStateFlow(1f)
 
@@ -358,14 +482,44 @@ class MusicService :
                 // Mark for bypass so it gets a fresh YT stream (with video if enabled)
                 bypassCacheForQualityChange.add(mediaId)
                 
+                // Rebuild the media item to ensure ExoPlayer re-evaluates it (especially track selection)
+                val newMediaItem = mediaItem.buildUpon().build()
+                
                 // Re-set the media item to force a new resolution and source creation
-                player.replaceMediaItem(index, mediaItem)
+                player.replaceMediaItem(index, newMediaItem)
                 player.seekTo(index, pos)
                 player.prepare()
                 if (isPlaying) player.play()
                 
                 Timber.tag("MusicService").d("Immersive mode toggled to $enabled, reloaded $mediaId at $pos")
             }
+            updateSessionCustomLayout()
+        }
+    }
+
+    fun updateSessionCustomLayout() {
+        updateNotification()
+    }
+
+    fun togglePlayerMode() {
+        scope.launch {
+            val currentMode = dataStore.get(PlayerModeKey, PlayerMode.SONG.name)
+            val newMode = if (currentMode == PlayerMode.SONG.name) PlayerMode.VIDEO.name else PlayerMode.SONG.name
+            dataStore.edit { settings ->
+                settings[PlayerModeKey] = newMode
+            }
+            Timber.tag(SERVICE_TAG).d("Player mode toggled to $newMode via custom command")
+        }
+    }
+
+    fun toggleLyrics() {
+        scope.launch {
+            val current = dataStore.get(ShowLyricsKey, false)
+            dataStore.edit { settings ->
+                settings[ShowLyricsKey] = !current
+            }
+            Timber.tag(SERVICE_TAG).d("Lyrics toggled to ${!current} via custom command")
+            updateNotification()
         }
     }
 
@@ -379,6 +533,50 @@ class MusicService :
     @Inject
     @DownloadCache
     lateinit var downloadCache: SimpleCache
+
+    fun startRadioSeamlessly() {
+        val current = player.currentMediaItem ?: return
+        val currentMetadata = currentMediaMetadata.value ?: return
+        scope.launch {
+            val queue = com.metrolist.music.playback.queues.YouTubeQueue.radio(currentMetadata)
+            val initialStatus = queue.getInitialStatus()
+            if (initialStatus.items.isNotEmpty()) {
+                // Remove all items after the current one
+                val count = player.mediaItemCount
+                val currentIndex = player.currentMediaItemIndex
+                if (count > currentIndex + 1) {
+                    player.removeMediaItems(currentIndex + 1, count)
+                }
+                currentQueue = queue
+                queueTitle = "Radio"
+                // The first item from the radio queue is likely the same as the current song
+                // so we don't necessarily need to add it, but we prepare for the next ones.
+            }
+        }
+    }
+
+
+    fun toggleLibraryVisibility() {
+        scope.launch {
+            val songToToggle = currentSong.first()
+            songToToggle?.let {
+                val isInLibrary = it.song.inLibrary != null
+                val token = if (isInLibrary) it.song.libraryRemoveToken else it.song.libraryAddToken
+
+                // Call YouTube API with feedback token if available
+                token?.let { feedbackToken ->
+                    YouTube.feedback(listOf(feedbackToken))
+                }
+
+                // Update local database
+                database.query {
+                    update(it.song.toggleLibrary())
+                }
+                currentMediaMetadata.value = player.currentMetadata
+            }
+        }
+    }
+
 
     lateinit var player: ExoPlayer
         private set
@@ -425,7 +623,7 @@ class MusicService :
     private val songUrlCache = HashMap<String, Pair<String, Long>>()
 
     // Flag to bypass cache when quality changes - forces fresh stream fetch
-    private val bypassCacheForQualityChange = mutableSetOf<String>()
+    private val bypassCacheForQualityChange = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     // Enhanced error tracking for strict retry management
     private var currentMediaIdRetryCount = mutableMapOf<String, Int>()
@@ -484,7 +682,17 @@ class MusicService :
 
     override fun onCreate() {
         super.onCreate()
-        isRunning = true
+        isMusicServiceRunning = true
+
+        // Initialize critical variables early to prevent race conditions in ResolvingDataSource
+        connectivityManager = getSystemService()!!
+        connectivityObserver = NetworkConnectivityObserver(this)
+        
+        runBlocking {
+            val qualityName = dataStore.get(AudioQualityKey, com.metrolist.music.constants.AudioQuality.AUTO.name)
+            audioQuality = com.metrolist.music.constants.AudioQuality.entries.find { it.name == qualityName } 
+                ?: com.metrolist.music.constants.AudioQuality.AUTO
+        }
 
         // Player rediness reset to false
         playerInitialized.value = false
@@ -560,9 +768,12 @@ class MusicService :
         setupAudioFocusRequest()
 
         mediaLibrarySessionCallback.apply {
+            service = this@MusicService
             toggleLike = ::toggleLike
             toggleStartRadio = ::toggleStartRadio
-            toggleLibrary = ::toggleLibrary
+            toggleLibrary = ::toggleLibraryVisibility
+            togglePlayerMode = ::togglePlayerMode
+            toggleLyrics = ::toggleLyrics
         }
 
         val sessionPlayer = object : androidx.media3.common.ForwardingPlayer(player) {
@@ -633,13 +844,20 @@ class MusicService :
             player.shuffleModeEnabled = dataStore.get(ShuffleModeKey, false)
         }
 
+        scope.launch {
+            dataStore.data.map { it[PlayerModeKey] ?: PlayerMode.SONG.name }
+                .distinctUntilChanged()
+                .collect { mode ->
+                    setImmersiveMode(mode == PlayerMode.VIDEO.name)
+                }
+        }
+
         // Keep a connected controller so that notification works
         val sessionToken = SessionToken(this, ComponentName(this, MusicService::class.java))
         val controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
         controllerFuture.addListener({ controllerFuture.get() }, MoreExecutors.directExecutor())
 
-        connectivityManager = getSystemService()!!
-        connectivityObserver = NetworkConnectivityObserver(this)
+        // connectivityManager and connectivityObserver initialized earlier
 
         val screenStateFilter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
@@ -649,7 +867,6 @@ class MusicService :
 
         audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
 
-        audioQuality = dataStore.get(AudioQualityKey).toEnum(com.metrolist.music.constants.AudioQuality.AUTO)
         playerVolume = MutableStateFlow(dataStore.get(PlayerVolumeKey, 1f).coerceIn(0f, 1f))
 
         scope.launch {
@@ -676,9 +893,8 @@ class MusicService :
                     }
                 }
 
-                if (state == com.metrolist.music.pearconnect.PearConnectState.CONNECTED && playbackState != null) {
-                if (playbackState != null && playbackState.trackInfo != null) {
-                    val track = playbackState.trackInfo
+                if (state == com.metrolist.music.pearconnect.PearConnectState.CONNECTED && playbackState?.trackInfo != null) {
+                    val track = playbackState.trackInfo!!
                     val currentId = player.currentMediaItem?.mediaId
                     if (currentId != track.videoId) {
                         val thumb = track.thumbnail?.takeUnless { it.isBlank() } ?: "https://i.ytimg.com/vi/${track.videoId}/maxresdefault.jpg"
@@ -711,7 +927,6 @@ class MusicService :
                 }
             }
         }
-    }
 
         // Initialize Google Cast
         initializeCast()
@@ -848,18 +1063,40 @@ class MusicService :
         ) { mediaMetadata, showLyrics ->
             mediaMetadata to showLyrics
         }.collectLatest(scope) { (mediaMetadata, showLyrics) ->
-            if (showLyrics && mediaMetadata != null && database.lyrics(mediaMetadata.id)
-                    .first() == null
-            ) {
+            if (mediaMetadata == null) return@collectLatest
+            
+            var lyricsEntity = database.lyrics(mediaMetadata.id).first()
+            if (showLyrics && lyricsEntity == null) {
                 val lyricsWithProvider = lyricsHelper.getLyrics(mediaMetadata)
+                val newEntity = LyricsEntity(
+                    id = mediaMetadata.id,
+                    lyrics = lyricsWithProvider.lyrics,
+                    provider = lyricsWithProvider.provider,
+                )
                 database.query {
-                    upsert(
-                        LyricsEntity(
-                            id = mediaMetadata.id,
-                            lyrics = lyricsWithProvider.lyrics,
-                            provider = lyricsWithProvider.provider,
-                        ),
-                    )
+                    upsert(newEntity)
+                }
+                lyricsEntity = newEntity
+            }
+            
+            // Expose lyrics to media session extras
+            val currentItem = player.currentMediaItem
+            if (currentItem != null && currentItem.mediaId == mediaMetadata.id) {
+                val currentExtras = currentItem.mediaMetadata.extras ?: Bundle()
+                val lyricsText = lyricsEntity?.lyrics ?: ""
+                if (currentExtras.getString("lyrics") != lyricsText) {
+                    val updatedExtras = Bundle(currentExtras).apply {
+                        putString("lyrics", lyricsText)
+                    }
+                    val updatedMetadata = currentItem.mediaMetadata.buildUpon()
+                        .setExtras(updatedExtras)
+                        .build()
+                    val newMediaItem = currentItem.buildUpon()
+                        .setMediaMetadata(updatedMetadata)
+                        .build()
+                    val currentIndex = player.currentMediaItemIndex
+                    player.replaceMediaItem(currentIndex, newMediaItem)
+                    Timber.tag("MusicService").d("Updated media item extras with lyrics for ${mediaMetadata.id}")
                 }
             }
         }
@@ -1365,6 +1602,10 @@ class MusicService :
     }
 
     private fun updateNotification() {
+        if (!::mediaSession.isInitialized) return
+        val isVideoMode = immersiveModeEnabled.value
+        val showLyrics = runBlocking { dataStore.get(ShowLyricsKey, false) }
+        
         mediaSession.setCustomLayout(
             listOf(
                 CommandButton
@@ -1381,8 +1622,14 @@ class MusicService :
                         ),
                     )
                     .setIconResId(if (currentSong.value?.song?.liked == true) R.drawable.ic_heart else R.drawable.ic_heart_outline)
-                    .setSessionCommand(CommandToggleLike)
+                    .setSessionCommand(MediaSessionConstants.CommandToggleLike)
                     .setEnabled(currentSong.value != null)
+                    .build(),
+                CommandButton
+                    .Builder()
+                    .setSessionCommand(MediaSessionConstants.CommandToggleLyrics)
+                    .setIconResId(if (showLyrics) R.drawable.lyrics_on else R.drawable.lyrics)
+                    .setDisplayName(if (showLyrics) "Hide Lyrics" else "Show Lyrics")
                     .build(),
                 CommandButton
                     .Builder()
@@ -1402,19 +1649,19 @@ class MusicService :
                             REPEAT_MODE_ALL -> R.drawable.repeat_on
                             else -> throw IllegalStateException()
                         },
-                    ).setSessionCommand(CommandToggleRepeatMode)
+                    ).setSessionCommand(MediaSessionConstants.CommandToggleRepeatMode)
                     .build(),
                 CommandButton
                     .Builder()
                     .setDisplayName(getString(if (player.shuffleModeEnabled) R.string.action_shuffle_off else R.string.action_shuffle_on))
                     .setIconResId(if (player.shuffleModeEnabled) R.drawable.shuffle_on else R.drawable.shuffle)
-                    .setSessionCommand(CommandToggleShuffle)
+                    .setSessionCommand(MediaSessionConstants.CommandToggleShuffle)
                     .build(),
-                CommandButton.Builder()
-                    .setDisplayName(getString(R.string.start_radio))
-                    .setIconResId(R.drawable.radio)
-                    .setSessionCommand(CommandToggleStartRadio)
-                    .setEnabled(currentSong.value != null)
+                CommandButton
+                    .Builder()
+                    .setSessionCommand(MediaSessionConstants.CommandTogglePlayerMode)
+                    .setIconResId(if (isVideoMode) R.drawable.slow_motion_video else R.drawable.music_note)
+                    .setDisplayName(if (isVideoMode) "Switch to Song" else "Switch to Video")
                     .build(),
             ),
         )
@@ -1548,97 +1795,7 @@ class MusicService :
         }
     }
 
-    fun startRadioSeamlessly() {
-        // Safety Check: Ensure Player is initilized
-        if (!playerInitialized.value) {
-            Timber.tag(SERVICE_TAG).w("startRadioSeamlessly called before player initialization")
-            return
-        }
 
-        val currentMediaMetadata = player.currentMetadata ?: return
-
-        val currentIndex = player.currentMediaItemIndex
-        val currentMediaId = currentMediaMetadata.id
-
-        scope.launch(SilentHandler) {
-            // Use simple videoId to let YouTube personalize recommendations
-            val radioQueue = YouTubeQueue(
-                endpoint = WatchEndpoint(
-                    videoId = currentMediaId
-                )
-            )
-
-            try {
-                val initialStatus = withContext(Dispatchers.IO) {
-                    radioQueue.getInitialStatus()
-                        .filterExplicit(dataStore.get(HideExplicitKey, false))
-                        .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
-                }
-
-                if (initialStatus.title != null) {
-                    queueTitle = initialStatus.title
-                }
-
-                // Filter radio items to exclude current media item
-                val radioItems = initialStatus.items.filter { item ->
-                    item.mediaId != currentMediaId
-                }
-
-                if (radioItems.isNotEmpty()) {
-                    val itemCount = player.mediaItemCount
-
-                    if (itemCount > currentIndex + 1) {
-                        player.removeMediaItems(currentIndex + 1, itemCount)
-                    }
-
-                    player.addMediaItems(currentIndex + 1, radioItems)
-                    if (player.shuffleModeEnabled) {
-                        val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-                        applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
-                    }
-                }
-
-                currentQueue = radioQueue
-            } catch (e: Exception) {
-                // Fallback: try with related endpoint
-                try {
-                    val nextResult = withContext(Dispatchers.IO) {
-                        YouTube.next(WatchEndpoint(videoId = currentMediaId)).getOrNull()
-                    }
-                    nextResult?.relatedEndpoint?.let { relatedEndpoint ->
-                        val relatedPage = withContext(Dispatchers.IO) {
-                            YouTube.related(relatedEndpoint).getOrNull()
-                        }
-                        relatedPage?.songs?.let { songs ->
-                            val radioItems = songs
-                                .filter { it.id != currentMediaId }
-                                .map { it.toMediaItem() }
-                                .filterExplicit(dataStore.get(HideExplicitKey, false))
-                                .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
-
-                            if (radioItems.isNotEmpty()) {
-                                val itemCount = player.mediaItemCount
-                                if (itemCount > currentIndex + 1) {
-                                    player.removeMediaItems(currentIndex + 1, itemCount)
-                                }
-                                player.addMediaItems(currentIndex + 1, radioItems)
-                                if (player.shuffleModeEnabled) {
-                                    val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-                                    applyShuffleOrder(
-                                        player.currentMediaItemIndex,
-                                        player.mediaItemCount,
-                                        shufflePlaylistFirst
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
-                    // Silent fail
-                }
-            }
-        }
-    }
 
     fun getAutomixAlbum(albumId: String) {
         scope.launch(SilentHandler) {
@@ -1738,144 +1895,6 @@ class MusicService :
 
     fun clearAutomix() {
         automixItems.value = emptyList()
-    }
-
-    fun playNext(items: List<MediaItem>) {
-        // If queue is empty or player is idle, play immediately instead
-        if (player.mediaItemCount == 0 || player.playbackState == STATE_IDLE) {
-            player.setMediaItems(items)
-            player.prepare()
-            // Don't start local playback if casting
-            if (castConnectionHandler?.isCasting?.value != true) {
-                player.play()
-            }
-            return
-        }
-
-        // Remove duplicates if enabled
-        if (dataStore.get(PreventDuplicateTracksInQueueKey, false)) {
-            val itemIds = items.map { it.mediaId }.toSet()
-            val indicesToRemove = mutableListOf<Int>()
-            val currentIndex = player.currentMediaItemIndex
-
-            for (i in 0 until player.mediaItemCount) {
-                if (i != currentIndex && player.getMediaItemAt(i).mediaId in itemIds) {
-                    indicesToRemove.add(i)
-                }
-            }
-
-            // Remove from highest index to lowest to maintain index stability
-            indicesToRemove.sortedDescending().forEach { index ->
-                player.removeMediaItem(index)
-            }
-        }
-
-        val insertIndex = player.currentMediaItemIndex + 1
-        val shuffleEnabled = player.shuffleModeEnabled
-
-        // Insert items immediately after the current item in the window/index space
-        player.addMediaItems(insertIndex, items)
-        player.prepare()
-
-        if (shuffleEnabled) {
-            // Rebuild shuffle order so that newly inserted items are played next
-            val timeline = player.currentTimeline
-            if (!timeline.isEmpty) {
-                val size = timeline.windowCount
-                val currentIndex = player.currentMediaItemIndex
-
-                // Newly inserted indices are a contiguous range [insertIndex, insertIndex + items.size)
-                val newIndices = (insertIndex until (insertIndex + items.size)).toSet()
-
-                // Collect existing shuffle traversal order excluding current index
-                val orderAfter = mutableListOf<Int>()
-                var idx = currentIndex
-                while (true) {
-                    idx = timeline.getNextWindowIndex(idx, Player.REPEAT_MODE_OFF, /*shuffleModeEnabled=*/true)
-                    if (idx == C.INDEX_UNSET) break
-                    if (idx != currentIndex) orderAfter.add(idx)
-                }
-
-                val prevList = mutableListOf<Int>()
-                var pIdx = currentIndex
-                while (true) {
-                    pIdx = timeline.getPreviousWindowIndex(pIdx, Player.REPEAT_MODE_OFF, /*shuffleModeEnabled=*/true)
-                    if (pIdx == C.INDEX_UNSET) break
-                    if (pIdx != currentIndex) prevList.add(pIdx)
-                }
-                prevList.reverse() // preserve original forward order
-
-                val existingOrder = (prevList + orderAfter).filter { it != currentIndex && it !in newIndices }
-
-                // Build new shuffle order: current -> newly inserted (in insertion order) -> rest
-                val nextBlock = (insertIndex until (insertIndex + items.size)).toList()
-                val finalOrder = IntArray(size)
-                var pos = 0
-                finalOrder[pos++] = currentIndex
-                nextBlock.forEach { if (it in 0 until size) finalOrder[pos++] = it }
-                existingOrder.forEach { if (pos < size) finalOrder[pos++] = it }
-
-                // Fill any missing indices (safety) to ensure a full permutation
-                if (pos < size) {
-                    for (i in 0 until size) {
-                        if (!finalOrder.contains(i)) {
-                            finalOrder[pos++] = i
-                            if (pos == size) break
-                        }
-                    }
-                }
-
-                player.setShuffleOrder(DefaultShuffleOrder(finalOrder, System.currentTimeMillis()))
-            }
-        }
-    }
-
-    fun addToQueue(items: List<MediaItem>) {
-        // Remove duplicates if enabled
-        if (dataStore.get(PreventDuplicateTracksInQueueKey, false)) {
-            val itemIds = items.map { it.mediaId }.toSet()
-            val indicesToRemove = mutableListOf<Int>()
-            val currentIndex = player.currentMediaItemIndex
-
-            for (i in 0 until player.mediaItemCount) {
-                if (i != currentIndex && player.getMediaItemAt(i).mediaId in itemIds) {
-                    indicesToRemove.add(i)
-                }
-            }
-
-            // Remove from highest index to lowest to maintain index stability
-            indicesToRemove.sortedDescending().forEach { index ->
-                player.removeMediaItem(index)
-            }
-        }
-
-        player.addMediaItems(items)
-        if (player.shuffleModeEnabled) {
-            val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-            applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
-        }
-        player.prepare()
-    }
-
-    fun toggleLibrary() {
-        scope.launch {
-            val songToToggle = currentSong.first()
-            songToToggle?.let {
-                val isInLibrary = it.song.inLibrary != null
-                val token = if (isInLibrary) it.song.libraryRemoveToken else it.song.libraryAddToken
-
-                // Call YouTube API with feedback token if available
-                token?.let { feedbackToken ->
-                    YouTube.feedback(listOf(feedbackToken))
-                }
-
-                // Update local database
-                database.query {
-                    update(it.song.toggleLibrary())
-                }
-                currentMediaMetadata.value = player.currentMetadata
-            }
-        }
     }
 
     fun toggleLike() {
@@ -2989,6 +3008,20 @@ class MusicService :
         return ResolvingDataSource.Factory(createCacheDataSource()) { dataSpec ->
             val mediaId = dataSpec.key ?: error("No media id")
 
+            // Radio stream direct URL bypass
+            if (mediaId.startsWith("radio:") || mediaId.startsWith("http://") || mediaId.startsWith("https://")) {
+                val directUri = if (mediaId.startsWith("radio:")) {
+                    mediaId.removePrefix("radio:").toUri()
+                } else {
+                    mediaId.toUri()
+                }
+                return@Factory dataSpec.withUri(directUri)
+            }
+            val uriStr = dataSpec.uri.toString()
+            if ((uriStr.startsWith("http://") || uriStr.startsWith("https://")) && !uriStr.contains("googlevideo.com")) {
+                return@Factory dataSpec
+            }
+
             // Check if we need to bypass cache for quality change
             val shouldBypassCache = bypassCacheForQualityChange.contains(mediaId)
 
@@ -3014,12 +3047,52 @@ class MusicService :
 
             Timber.tag("MusicService").i("FETCHING STREAM: $mediaId | quality=$audioQuality")
             val playbackData = runBlocking(Dispatchers.IO) {
-                YTPlayerUtils.playerResponseForPlayback(
-                    mediaId,
-                    audioQuality = audioQuality,
-                    connectivityManager = connectivityManager,
-                    preferVideo = immersiveModeEnabled.value
-                )
+                // If we're in video mode, check if there's a specific music video version (setVideoId)
+                // available for this track instead of just the audio version.
+                val videoIdToFetch = if (immersiveModeEnabled.value) {
+                    currentMediaMetadata.value?.setVideoId
+                        ?: database.getSetVideoId(mediaId)?.setVideoId
+                        ?: run {
+                            // FALLBACK: Try to find official video version via YouTube Next API
+                            // This allows us to find the high-quality video version for audio-only tracks.
+                            val nextResult = YouTube.next(com.metrolist.innertube.models.WatchEndpoint(videoId = mediaId)).getOrNull()
+                            val officialVideoId = nextResult?.items?.firstOrNull { it.isVideoSong }?.id
+                            if (officialVideoId != null) {
+                                Timber.tag("MusicService").i("Found official video via YouTube: $officialVideoId for $mediaId")
+                                database.insert(com.metrolist.music.db.entities.SetVideoIdEntity(videoId = mediaId, setVideoId = officialVideoId))
+                                officialVideoId
+                            } else {
+                                mediaId
+                            }
+                        }
+                } else {
+                    mediaId
+                }
+                
+                if (videoIdToFetch != mediaId) {
+                    Timber.tag("MusicService").i("Switching to video-specific ID: $videoIdToFetch (original: $mediaId)")
+                }
+
+                try {
+                    YTPlayerUtils.playerResponseForPlayback(
+                        videoIdToFetch,
+                        audioQuality = audioQuality,
+                        connectivityManager = connectivityManager,
+                        preferVideo = immersiveModeEnabled.value
+                    )
+                } catch (throwable: Throwable) {
+                    if (videoIdToFetch != mediaId) {
+                        Timber.tag("MusicService").w("Failed to fetch stream for video specific ID: $videoIdToFetch. Falling back to original ID: $mediaId. Error: ${throwable.message}")
+                        YTPlayerUtils.playerResponseForPlayback(
+                            mediaId,
+                            audioQuality = audioQuality,
+                            connectivityManager = connectivityManager,
+                            preferVideo = immersiveModeEnabled.value
+                        )
+                    } else {
+                        throw throwable
+                    }
+                }
             }.getOrElse { throwable ->
                 when (throwable) {
                     is PlaybackException -> throw throwable
@@ -3092,11 +3165,6 @@ class MusicService :
                     streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
                 
                 val newSpec = dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
-                if (shouldBypassCache) {
-                    return@Factory newSpec.buildUpon()
-                        .setKey("${mediaId}_video")
-                        .build()
-                }
                 return@Factory newSpec
             }
         }
@@ -3105,9 +3173,7 @@ class MusicService :
     private fun createMediaSourceFactory() =
         DefaultMediaSourceFactory(
             createDataSourceFactory(),
-            ExtractorsFactory {
-                arrayOf(MatroskaExtractor(), FragmentedMp4Extractor())
-            },
+            DefaultExtractorsFactory(),
         )
 
     private fun createRenderersFactory(
@@ -3115,6 +3181,13 @@ class MusicService :
         silenceProcessor: SilenceDetectorAudioProcessor
     ) =
         object : DefaultRenderersFactory(this) {
+            init {
+                // Enable built-in video renderers (MediaCodecVideoRenderer).
+                // This is required for video playback via PlayerView.
+                // EXTENSION_RENDERER_MODE_OFF still enables the built-in (non-extension) video renderer.
+                setExtensionRendererMode(EXTENSION_RENDERER_MODE_OFF)
+            }
+
             override fun buildAudioSink(
                 context: Context,
                 enableFloatOutput: Boolean,
@@ -3252,7 +3325,7 @@ class MusicService :
     }
 
     override fun onDestroy() {
-        isRunning = false
+        isMusicServiceRunning = false
 
         // Save episode position before destroying
         val currentMetadata = player.currentMediaItem?.metadata
@@ -3699,9 +3772,5 @@ class MusicService :
         private const val MIN_GAIN_MB = -1500 // Minimum gain in millibels (-15 dB)
 
         private const val SERVICE_TAG = "MusicService"
-
-        @Volatile
-        var isRunning = false
-            private set
     }
 }

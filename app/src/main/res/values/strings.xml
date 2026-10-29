@@ -346,4 +346,19 @@
     <string name="new_version_available">New version available</string>
     <string name="translation_models">Translation Models</string>
     <string name="clear_translation_models">Clear translation models</string>
+
+    <!-- Radio Browser -->
+    <string name="radio_search_hint">Search radio stations, cities, countries…</string>
+    <string name="radio_search_hint_name">Search by station name…</string>
+    <string name="radio_search_hint_city">Search by city or state (e.g. London, New York)…</string>
+    <string name="radio_search_hint_country">Search by country (e.g. Canada, Germany, US)…</string>
+    <string name="radio_search_hint_tag">Search by genre or tag (e.g. jazz, rock)…</string>
+    <string name="radio_search_by_name">Name</string>
+    <string name="radio_search_by_city">City / State</string>
+    <string name="radio_search_by_country">Country</string>
+    <string name="radio_search_by_tag">Genre / Tag</string>
+    <string name="radio_loading">Finding radio stations…</string>
+    <string name="radio_error">Could not load radio stations</string>
+    <string name="radio_no_results">No radio stations found</string>
+    <string name="radio_stations_count">%d stations found</string>
 </resources>

@@ -10,6 +10,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.Context
 import android.content.Intent
 import com.metrolist.music.playback.MusicService
+import com.metrolist.music.playback.isMusicServiceRunning
 
 class TurntableWidgetReceiver : AppWidgetProvider() {
 
@@ -20,7 +21,7 @@ class TurntableWidgetReceiver : AppWidgetProvider() {
     ) {
         // Only trigger update through MusicService if it's already running
         // This prevents BackgroundServiceStartNotAllowedException on Android 14+
-        if (MusicService.isRunning) {
+        if (isMusicServiceRunning) {
             val intent = Intent(context, MusicService::class.java).apply {
                 action = ACTION_UPDATE_TURNTABLE_WIDGET
             }

@@ -670,6 +670,7 @@ class MainActivity : ComponentActivity() {
                 val topLevelScreens = remember {
                     listOf(
                         Screens.Home.route,
+                        Screens.Radio.route,
                         Screens.Library.route,
                         Screens.ListenTogether.route,
                         "settings",
@@ -879,6 +880,7 @@ class MainActivity : ComponentActivity() {
                     when (navBackStackEntry?.destination?.route) {
                         Screens.Home.route -> R.string.home
                         Screens.Search.route -> R.string.search
+                        Screens.Radio.route -> R.string.radio
                         Screens.Library.route -> R.string.filter_library
                         Screens.ListenTogether.route -> R.string.together
                         else -> null
@@ -1213,6 +1215,7 @@ class MainActivity : ComponentActivity() {
                                     navController = navController,
                                     startDestination = when (tabOpenedFromShortcut ?: defaultOpenTab) {
                                         NavigationTab.HOME -> Screens.Home
+                                        NavigationTab.RADIO -> Screens.Radio
                                         NavigationTab.LIBRARY -> Screens.Library
                                         else -> Screens.Home
                                     }.route,

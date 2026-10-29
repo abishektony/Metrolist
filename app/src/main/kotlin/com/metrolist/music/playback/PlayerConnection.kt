@@ -5,6 +5,7 @@
 
 package com.metrolist.music.playback
 
+import com.metrolist.music.playback.MusicService
 import android.content.Context
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -22,7 +23,10 @@ import com.metrolist.music.extensions.getCurrentQueueIndex
 import com.metrolist.music.extensions.getQueueWindows
 import com.metrolist.music.extensions.metadata
 import com.metrolist.music.extensions.togglePlayPause
+import com.metrolist.music.models.RadioStation
+import com.metrolist.music.models.toMediaItem
 import com.metrolist.music.playback.MusicService.MusicBinder
+import com.metrolist.music.playback.queues.ListQueue
 import com.metrolist.music.playback.queues.Queue
 import com.metrolist.music.utils.reportException
 import kotlinx.coroutines.CoroutineScope
@@ -242,6 +246,53 @@ class PlayerConnection(
         }
     }
 
+    fun playRadioStation(station: RadioStation) {
+        val mediaItem = station.toMediaItem()
+        val queue = ListQueue(
+            title = station.name,
+            items = listOf(mediaItem)
+        )
+        playQueue(queue)
+    }
+
+    fun getAutomix(playlistId: String) {
+        service.getAutomix(playlistId)
+    }
+
+    fun addToQueueAutomix(item: MediaItem, index: Int) {
+        service.addToQueueAutomix(item, index)
+    }
+
+    fun playNextAutomix(item: MediaItem, index: Int) {
+        service.playNextAutomix(item, index)
+    }
+
+    fun clearAutomix() {
+        service.clearAutomix()
+    }
+
+    val sleepTimer get() = service.sleepTimer
+    val automixItems get() = service.automixItems
+    val immersiveModeEnabled get() = service.immersiveModeEnabled
+    val castHandler get() = service.castConnectionHandler
+    val playerVolume get() = service.playerVolume
+
+    fun toggleLibraryVisibility() {
+        try {
+            service.toggleLibraryVisibility()
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Error in toggleLibrary")
+        }
+    }
+
+    fun toggleLike() {
+        service.toggleLike()
+    }
+
+    fun setImmersiveMode(enabled: Boolean) {
+        service.setImmersiveMode(enabled)
+    }
+
     fun startRadioSeamlessly() {
         // Block if Listen Together guest
         if (shouldBlockPlaybackChanges?.invoke() == true) {
@@ -291,14 +342,6 @@ class PlayerConnection(
         }
     }
 
-    fun toggleLike() {
-        try {
-            service.toggleLike()
-        } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Error in toggleLike")
-        }
-    }
-
     fun toggleMute() {
         service.toggleMute()
     }
@@ -307,17 +350,6 @@ class PlayerConnection(
         service.setMuted(muted)
     }
 
-    fun toggleLibrary() {
-        try {
-            service.toggleLibrary()
-        } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Error in toggleLibrary")
-        }
-    }
-
-    /**
-     * Toggle play/pause - handles Cast when active
-     */
     fun togglePlayPause() {
         if (shouldBlockPlaybackChanges?.invoke() == true && !allowInternalSync) return
         val isCurrentlyPlaying = playWhenReady.value

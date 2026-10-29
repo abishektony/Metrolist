@@ -85,6 +85,7 @@ import com.metrolist.music.R
 import com.metrolist.music.constants.HideExplicitKey
 import com.metrolist.music.constants.HideVideoSongsKey
 import com.metrolist.music.db.entities.Album
+import com.metrolist.music.playback.MusicService
 import com.metrolist.music.playback.queues.LocalAlbumRadio
 import com.metrolist.music.ui.component.IconButton
 import com.metrolist.music.ui.component.LocalMenuState
@@ -329,7 +330,7 @@ fun AlbumScreen(
                         // Play Button - Larger primary circular button
                         Surface(
                             onClick = {
-                                playerConnection.service.getAutomix(playlistId)
+                                playlistId?.let { playerConnection.getAutomix(it) }
                                 playerConnection.playQueue(
                                     LocalAlbumRadio(albumWithSongs),
                                 )
@@ -439,7 +440,7 @@ fun AlbumScreen(
                                     } else if (song.id == mediaMetadata?.id) {
                                         playerConnection.togglePlayPause()
                                     } else {
-                                        playerConnection.service.getAutomix(playlistId)
+                                        playlistId?.let { playerConnection.getAutomix(it) }
                                         playerConnection.playQueue(
                                             LocalAlbumRadio(albumWithSongs, startIndex = index),
                                         )

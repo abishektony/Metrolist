@@ -94,6 +94,7 @@ fun Song.toMediaMetadata() =
             )
         },
         explicit = song.explicit,
+        setVideoId = setVideoId?.setVideoId,
         // Use a non-ATV type if isVideo is true to indicate it's a video song
         musicVideoType = if (song.isVideo) "MUSIC_VIDEO_TYPE_OMV" else null,
         suggestedBy = null,

@@ -177,6 +177,8 @@ object YTPlayerUtils {
             isAgeRestricted -> 0
             else -> -1
         }
+        
+        Timber.tag(TAG).d("Starting playback resolution: videoId=$videoId, preferVideo=$preferVideo, startIndex=$startIndex")
 
         for (clientIndex in (startIndex until STREAM_FALLBACK_CLIENTS.size)) {
             // reset for each client
@@ -246,7 +248,7 @@ object YTPlayerUtils {
                     continue
                 }
 
-                Timber.tag(logTag).d("Format found: ${format.mimeType}, bitrate: ${format.bitrate}")
+                Timber.tag(logTag).d("Format found: ${format.mimeType}, itag: ${format.itag}, bitrate: ${format.bitrate}, resolution: ${format.width}x${format.height}")
 
                 streamUrl = findUrlOrNull(format, videoId, responseToUse, skipNewPipe = wasOriginallyAgeRestricted)
                 if (streamUrl == null) {
@@ -400,22 +402,17 @@ object YTPlayerUtils {
 
         if (preferVideo) {
             // First try to find a muxed format (audio + video) - usually itag 18 or 22
-            val muxedFormat = playerResponse.streamingData?.formats
-                ?.filter { it.width != null && (it.audioSampleRate != null || it.audioQuality != null) }
-                ?.maxByOrNull { it.width ?: 0 }
+            // We search in both 'formats' (legacy muxed) and 'adaptiveFormats' (though rarely muxed there)
+            val muxedFormat = (playerResponse.streamingData?.formats ?: emptyList())
+                .filter { it.width != null && (it.audioSampleRate != null || it.audioQuality != null || it.itag == 18 || it.itag == 22) }
+                .maxByOrNull { it.width ?: 0 }
 
             if (muxedFormat != null) {
-                Timber.tag(logTag).d("Selected muxed format: ${muxedFormat.mimeType}, resolution: ${muxedFormat.width}x${muxedFormat.height}")
+                Timber.tag(logTag).d("Selected muxed format: ${muxedFormat.mimeType}, itag: ${muxedFormat.itag}, resolution: ${muxedFormat.width}x${muxedFormat.height}")
                 return muxedFormat
             }
 
-            // If we are strictly preferring video, we might want to return null here to force 
-            // fallback to other clients that might have muxed formats (like TVHTML5)
-            // But we should only do this if we are not already on the last client.
-            // Since we don't know the client here, we'll try to find any video-only format 
-            // as a last resort, but only if it's better than nothing.
-            // HOWEVER, returnning video-only here would break audio.
-            // So we skip and fall back to audio below if no muxed found in this client.
+            Timber.tag(logTag).w("Prefer video was true but NO muxed format was found in this client's response!")
         }
 
         val format = playerResponse.streamingData?.adaptiveFormats

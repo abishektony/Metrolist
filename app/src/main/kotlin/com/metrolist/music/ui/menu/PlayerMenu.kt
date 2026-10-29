@@ -115,12 +115,12 @@ fun PlayerMenu(
     val context = LocalContext.current
     val database = LocalDatabase.current
     val playerConnection = LocalPlayerConnection.current ?: return
-    val playerVolume = playerConnection.service.playerVolume.collectAsState()
+    val playerVolume = playerConnection.playerVolume.collectAsState()
     
     // Cast state for volume control - safely access castConnectionHandler to prevent crashes
     val castHandler = remember(playerConnection) {
         try {
-            playerConnection.service.castConnectionHandler
+            playerConnection.castHandler
         } catch (e: Exception) {
             null
         }
@@ -291,7 +291,7 @@ fun PlayerMenu(
                     } else if (isPearConnected) {
                         pearConnectClient?.setVolume(volume)
                     } else {
-                        playerConnection.service.playerVolume.value = volume
+                        playerConnection.playerVolume.value = volume
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -465,7 +465,7 @@ fun PlayerMenu(
                                 )
                             },
                             onClick = {
-                                playerConnection.toggleLibrary()
+                                playerConnection.toggleLibraryVisibility()
                                 onDismiss()
                             }
                         )

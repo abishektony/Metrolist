@@ -190,7 +190,7 @@ fun Queue(
     // Cast state - safely access castConnectionHandler to prevent crashes during service lifecycle changes
     val castHandler = remember(playerConnection) {
         try {
-            playerConnection.service.castConnectionHandler
+            playerConnection.castHandler
         } catch (e: Exception) {
             null
         }
@@ -232,20 +232,20 @@ fun Queue(
     val sleepTimerFadeOutDefault by rememberPreference(SleepTimerFadeOutKey, false)
     var sleepTimerFadeOut by remember { mutableStateOf(sleepTimerFadeOutDefault) }
     val sleepTimerEnabled = remember(
-        playerConnection.service.sleepTimer.triggerTime,
-        playerConnection.service.sleepTimer.pauseWhenSongEnd
+        playerConnection.sleepTimer.triggerTime,
+        playerConnection.sleepTimer.pauseWhenSongEnd
     ) {
-        playerConnection.service.sleepTimer.isActive
+        playerConnection.sleepTimer.isActive
     }
     var sleepTimerTimeLeft by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(sleepTimerEnabled) {
         if (sleepTimerEnabled) {
             while (isActive) {
-                sleepTimerTimeLeft = if (playerConnection.service.sleepTimer.pauseWhenSongEnd) {
+                sleepTimerTimeLeft = if (playerConnection.sleepTimer.pauseWhenSongEnd) {
                     playerConnection.player.duration - playerConnection.player.currentPosition
                 } else {
-                    playerConnection.service.sleepTimer.triggerTime - System.currentTimeMillis()
+                    playerConnection.sleepTimer.triggerTime - System.currentTimeMillis()
                 }
                 delay(1000L)
             }
@@ -302,7 +302,7 @@ fun Queue(
                         icon = R.drawable.bedtime,
                         onClick = {
                             if (sleepTimerEnabled) {
-                                playerConnection.service.sleepTimer.clear()
+                                playerConnection.sleepTimer.clear()
                             } else {
                                 showSleepTimerDialog = true
                             }
@@ -448,7 +448,7 @@ fun Queue(
                         onClick = {
                             if (!isListenTogetherGuest) {
                                 if (sleepTimerEnabled) {
-                                    playerConnection.service.sleepTimer.clear()
+                                    playerConnection.sleepTimer.clear()
                                 } else {
                                     showSleepTimerDialog = true
                                 }
@@ -544,7 +544,7 @@ fun Queue(
                     onDismiss = { showSleepTimerDialog = false },
                     onConfirm = {
                         showSleepTimerDialog = false
-                        playerConnection.service.sleepTimer.start(
+                        playerConnection.sleepTimer.start(
                             minute = sleepTimerValue.roundToInt(),
                             stopAfterCurrentSong = sleepTimerStopAfterCurrentSong,
                             fadeOut = sleepTimerFadeOut,
@@ -608,7 +608,7 @@ fun Queue(
                             OutlinedButton(
                                 onClick = {
                                     showSleepTimerDialog = false
-                                    playerConnection.service.sleepTimer.start(
+                                    playerConnection.sleepTimer.start(
                                         minute = -1,
                                         stopAfterCurrentSong = false,
                                         fadeOut = sleepTimerFadeOut,
@@ -667,7 +667,7 @@ fun Queue(
                 rawQueueWindows
             }
         }
-        val automix by playerConnection.service.automixItems.collectAsState()
+        val automix by playerConnection.automixItems.collectAsState()
         val mutableQueueWindows = remember { mutableStateListOf<Timeline.Window>() }
         val queueLength =
             remember(queueWindows) {
@@ -980,7 +980,7 @@ fun Queue(
                                     if (!isListenTogetherGuest) {
                                         IconButton(
                                             onClick = {
-                                                playerConnection.service.playNextAutomix(
+                                                playerConnection.playNextAutomix(
                                                     item,
                                                     index,
                                                 )
@@ -993,7 +993,7 @@ fun Queue(
                                         }
                                         IconButton(
                                             onClick = {
-                                                playerConnection.service.addToQueueAutomix(
+                                                playerConnection.addToQueueAutomix(
                                                     item,
                                                     index,
                                                 )

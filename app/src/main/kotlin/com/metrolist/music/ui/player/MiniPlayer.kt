@@ -194,7 +194,7 @@ private fun NewMiniPlayer(
     // Cast state - safely access castConnectionHandler to prevent crashes during service lifecycle changes
     val castHandler = remember(playerConnection) {
         try {
-            playerConnection.service.castConnectionHandler
+            playerConnection.castHandler
         } catch (e: Exception) {
             null
         }
@@ -663,7 +663,7 @@ private fun LegacyMiniPlayer(
     
     val castHandler = remember(playerConnection) {
         try {
-            playerConnection.service.castConnectionHandler
+            playerConnection.castHandler
         } catch (e: Exception) {
             null
         }
@@ -1077,7 +1077,7 @@ private fun FavoriteButton(songId: String) {
                 color = if (isLiked) errorColor.copy(alpha = 0.1f) else Color.Transparent,
                 shape = CircleShape
             )
-            .clickable { playerConnection.service.toggleLike() }
+            .clickable { playerConnection.toggleLike() }
     ) {
         Icon(
             painter = painterResource(if (isLiked) R.drawable.favorite else R.drawable.favorite_border),

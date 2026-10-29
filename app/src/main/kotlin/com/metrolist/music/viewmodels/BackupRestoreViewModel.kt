@@ -35,13 +35,14 @@ import com.metrolist.music.extensions.tryOrNull
 import com.metrolist.music.extensions.zipInputStream
 import com.metrolist.music.extensions.zipOutputStream
 import com.metrolist.music.playback.MusicService
-import com.metrolist.music.playback.MusicService.Companion.PERSISTENT_QUEUE_FILE
+import com.metrolist.music.playback.PERSISTENT_QUEUE_FILE
 import com.metrolist.music.utils.dataStore
 import com.metrolist.music.utils.reportException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import timber.log.Timber
+import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.zip.ZipEntry
@@ -156,7 +157,7 @@ class BackupRestoreViewModel @Inject constructor(
             }
 
             context.stopService(Intent(context, MusicService::class.java))
-            context.filesDir.resolve(PERSISTENT_QUEUE_FILE).delete()
+            (context.filesDir / PERSISTENT_QUEUE_FILE).delete()
             val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
             }
