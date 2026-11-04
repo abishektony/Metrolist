@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
 class PoTokenGenerator {
@@ -29,18 +30,18 @@ class PoTokenGenerator {
         }
 
         return try {
-            Timber.tag(TAG).d("Calling runBlocking to generate poToken...")
-            runBlocking { getWebClientPoToken(videoId, sessionId, forceRecreate = false) }
-        } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "poToken generation exception: ${e.javaClass.simpleName}: ${e.message}")
-            when (e) {
-                is BadWebViewException -> {
-                    Timber.tag(TAG).e(e, "Could not obtain poToken because WebView is broken")
-                    webViewBadImpl = true
-                    null
+            Timber.tag(TAG).d("Calling runBlocking with 1500ms timeout to generate poToken...")
+            runBlocking {
+                withTimeoutOrNull(1500L) {
+                    getWebClientPoToken(videoId, sessionId, forceRecreate = false)
                 }
-                else -> throw e // includes PoTokenException
             }
+        } catch (e: Exception) {
+            Timber.tag(TAG).w(e, "poToken generation failed/timed out: ${e.javaClass.simpleName}: ${e.message}")
+            if (e is BadWebViewException) {
+                webViewBadImpl = true
+            }
+            null
         }
     }
 

@@ -171,6 +171,7 @@ class PlayerConnection(
     val canSkipNext = MutableStateFlow(true)
 
     val error = MutableStateFlow<PlaybackException?>(null)
+    val hasVideoTrack = MutableStateFlow(false)
     val isMuted = service.isMuted
 
     val waitingForNetworkConnection = service.waitingForNetworkConnection
@@ -203,6 +204,14 @@ class PlayerConnection(
                     }
                 }
             }
+            // Observe metadata updates from service (e.g. video status resolved after playback starts)
+            scope.launch {
+                service.currentMediaMetadata.collect { meta ->
+                    if (meta != null && (mediaMetadata.value == null || meta.id == mediaMetadata.value?.id)) {
+                        mediaMetadata.value = meta
+                    }
+                }
+            }
             // Initial setup if flow hasn't emitted yet but service is ready
             if (attachedPlayer == null && service.isPlayerReady.value) {
                 updateAttachedPlayer(player)
@@ -230,6 +239,9 @@ class PlayerConnection(
         currentMediaItemIndex.value = newPlayer.currentMediaItemIndex
         shuffleModeEnabled.value = newPlayer.shuffleModeEnabled
         repeatMode.value = newPlayer.repeatMode
+        val isAtv = newPlayer.currentMetadata?.musicVideoType == com.metrolist.innertube.models.WatchEndpoint.WatchEndpointMusicSupportedConfigs.WatchEndpointMusicConfig.Companion.MUSIC_VIDEO_TYPE_ATV
+        hasVideoTrack.value = !isAtv && (newPlayer.currentTracks.isTypeSupported(androidx.media3.common.C.TRACK_TYPE_VIDEO) ||
+            newPlayer.currentTracks.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_VIDEO))
         Timber.tag(TAG).d("Attached to new player instance: $newPlayer")
     }
 
@@ -606,10 +618,20 @@ class PlayerConnection(
         mediaItem: MediaItem?,
         reason: Int,
     ) {
-        mediaMetadata.value = mediaItem?.metadata
+        val meta = mediaItem?.metadata
+        mediaMetadata.value = meta
+        val isAtv = meta?.musicVideoType == com.metrolist.innertube.models.WatchEndpoint.WatchEndpointMusicSupportedConfigs.WatchEndpointMusicConfig.Companion.MUSIC_VIDEO_TYPE_ATV
+        hasVideoTrack.value = !isAtv && (player.currentTracks.isTypeSupported(androidx.media3.common.C.TRACK_TYPE_VIDEO) ||
+            player.currentTracks.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_VIDEO))
         currentMediaItemIndex.value = player.currentMediaItemIndex
         currentWindowIndex.value = player.getCurrentQueueIndex()
         updateCanSkipPreviousAndNext()
+    }
+
+    override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+        val isAtv = mediaMetadata.value?.musicVideoType == com.metrolist.innertube.models.WatchEndpoint.WatchEndpointMusicSupportedConfigs.WatchEndpointMusicConfig.Companion.MUSIC_VIDEO_TYPE_ATV
+        hasVideoTrack.value = !isAtv && (tracks.isTypeSupported(androidx.media3.common.C.TRACK_TYPE_VIDEO) ||
+            tracks.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_VIDEO))
     }
 
     override fun onTimelineChanged(

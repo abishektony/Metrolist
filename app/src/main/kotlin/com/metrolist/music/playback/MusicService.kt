@@ -151,7 +151,7 @@ import com.metrolist.music.db.entities.Event
 import com.metrolist.music.db.entities.FormatEntity
 import com.metrolist.music.db.entities.LyricsEntity
 import com.metrolist.music.lyrics.LyricsUtils
-import kotlinx.coroutines.isActive
+import com.metrolist.innertube.models.WatchEndpoint.WatchEndpointMusicSupportedConfigs.WatchEndpointMusicConfig.Companion.MUSIC_VIDEO_TYPE_ATV
 import com.metrolist.music.db.entities.RelatedSongMap
 import com.metrolist.music.db.entities.Song
 import com.metrolist.music.di.DownloadCache
@@ -469,48 +469,26 @@ class MusicService :
         if (immersiveModeEnabled.value != enabled) {
             immersiveModeEnabled.value = enabled
             
-            if (!enabled) {
-                player.clearVideoSurface()
-            }
-            
             // Toggle on desktop if connected
             if (pearConnectClient.state.value == com.metrolist.music.pearconnect.PearConnectState.CONNECTED) {
                 pearConnectClient.toggleImmersive()
             }
 
-            // Only force re-fetch if we're currently playing something locally
-            player.currentMediaItem?.let { mediaItem ->
-                val mediaId = mediaItem.mediaId
-                val pos = player.currentPosition
-                val index = player.currentMediaItemIndex
-                val isPlaying = player.isPlaying
-                
-                // Clear URL cache and mark for bypass so fresh stream is resolved
-                songUrlCache.remove(mediaId)
-                songUrlCache.remove("${mediaId}_video")
-                songUrlCache.remove("${mediaId}_audio")
-                try {
-                    playerCache.removeResource(mediaId)
-                } catch (_: Exception) {}
-                bypassCacheForQualityChange.add(mediaId)
-                
-                // Build a distinct URI so ExoPlayer recognizes the item needs a new MediaSource
-                val modeUri = mediaId.toUri().buildUpon()
-                    .appendQueryParameter("mode", if (enabled) "video" else "audio")
-                    .appendQueryParameter("t", System.currentTimeMillis().toString())
-                    .build()
-                val newMediaItem = mediaItem.buildUpon()
-                    .setUri(modeUri)
-                    .build()
-                
-                player.replaceMediaItem(index, newMediaItem)
-                player.seekTo(index, pos)
-                player.prepare()
-                if (isPlaying) player.play()
-                
-                Timber.tag("MusicService").d("Immersive mode toggled to $enabled, reloaded $mediaId at $pos")
-            }
+            Timber.tag("MusicService").d("Immersive mode toggled to $enabled")
             updateSessionCustomLayout()
+
+            val currentMedia = currentMediaMetadata.value
+            if (currentMedia != null && currentMedia.isVideoSong) {
+                val currentIndex = player.currentMediaItemIndex
+                val currentPosition = player.currentPosition
+                val wasPlaying = player.isPlaying
+                player.stop()
+                player.seekTo(currentIndex, currentPosition)
+                player.prepare()
+                if (wasPlaying) {
+                    player.play()
+                }
+            }
         }
     }
 
@@ -642,6 +620,12 @@ class MusicService :
 
     // URL cache for stream URLs - class-level so it can be invalidated on errors
     private val songUrlCache = HashMap<String, Pair<String, Long>>()
+
+    private fun invalidateSongUrlCache(mediaId: String) {
+        songUrlCache.remove(mediaId)
+        songUrlCache.remove("${mediaId}_audio")
+        songUrlCache.remove("${mediaId}_video")
+    }
 
     // Flag to bypass cache when quality changes - forces fresh stream fetch
     private val bypassCacheForQualityChange = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -1022,7 +1006,7 @@ class MusicService :
                     Timber.tag("MusicService").i("RELOADING STREAM: $mediaId at position ${currentPosition}ms")
 
                     // Clear cached URL to force fresh fetch
-                    songUrlCache.remove(mediaId)
+                    invalidateSongUrlCache(mediaId)
 
                     // CRITICAL: Clear caches synchronously to prevent format parsing errors
                     runBlocking(Dispatchers.IO) {
@@ -1098,69 +1082,6 @@ class MusicService :
                     upsert(newEntity)
                 }
                 lyricsEntity = newEntity
-            }
-            
-            val lyricsText = lyricsEntity?.lyrics ?: ""
-            val baseArtist = mediaMetadata.artists.joinToString { it.name }
-
-            val parsedLyrics = if (lyricsText.isNotBlank()) {
-                LyricsUtils.parseLyrics(lyricsText)
-            } else emptyList()
-
-            val hasSync = parsedLyrics.any { it.time > 0 }
-
-            if (showLyrics && parsedLyrics.isNotEmpty()) {
-                var lastSyncedLine = ""
-                while (coroutineContext.isActive) {
-                    val currentPos = player.currentPosition
-                    val currentLine = if (hasSync) {
-                        val lineIdx = LyricsUtils.findCurrentLineIndex(parsedLyrics, currentPos)
-                        parsedLyrics.getOrNull(lineIdx)?.text?.trim().orEmpty()
-                    } else {
-                        parsedLyrics.firstOrNull()?.text?.trim().orEmpty()
-                    }
-
-                    if (currentLine != lastSyncedLine) {
-                        lastSyncedLine = currentLine
-                        val currentItem = player.currentMediaItem
-                        if (currentItem != null && currentItem.mediaId == mediaMetadata.id) {
-                            val displaySubtitle = if (currentLine.isNotBlank()) " $currentLine" else baseArtist
-                            val currentExtras = currentItem.mediaMetadata.extras ?: Bundle()
-                            val updatedExtras = Bundle(currentExtras).apply {
-                                putString("lyrics", lyricsText)
-                            }
-                            val updatedMetadata = currentItem.mediaMetadata.buildUpon()
-                                .setSubtitle(displaySubtitle)
-                                .setDescription(currentLine.ifBlank { baseArtist })
-                                .setExtras(updatedExtras)
-                                .build()
-                            val newMediaItem = currentItem.buildUpon()
-                                .setMediaMetadata(updatedMetadata)
-                                .build()
-                            val currentIndex = player.currentMediaItemIndex
-                            player.replaceMediaItem(currentIndex, newMediaItem)
-                        }
-                    }
-                    delay(500)
-                }
-            } else {
-                val currentItem = player.currentMediaItem
-                if (currentItem != null && currentItem.mediaId == mediaMetadata.id) {
-                    val currentExtras = currentItem.mediaMetadata.extras ?: Bundle()
-                    val updatedExtras = Bundle(currentExtras).apply {
-                        putString("lyrics", lyricsText)
-                    }
-                    val updatedMetadata = currentItem.mediaMetadata.buildUpon()
-                        .setSubtitle(baseArtist)
-                        .setDescription(baseArtist)
-                        .setExtras(updatedExtras)
-                        .build()
-                    val newMediaItem = currentItem.buildUpon()
-                        .setMediaMetadata(updatedMetadata)
-                        .build()
-                    val currentIndex = player.currentMediaItemIndex
-                    player.replaceMediaItem(currentIndex, newMediaItem)
-                }
             }
         }
 
@@ -1743,20 +1664,47 @@ class MusicService :
             ?: (playbackData?.videoDetails ?: YTPlayerUtils.playerResponseForMetadata(mediaId)
                 .getOrNull()?.videoDetails)?.lengthSeconds?.toInt()
             ?: -1
+
+        val musicVideoType = playbackData?.videoDetails?.musicVideoType ?: mediaMetadata.musicVideoType
+        val isAtv = musicVideoType == MUSIC_VIDEO_TYPE_ATV
+        val isExplicitVideoType = musicVideoType != null && !isAtv
+        val isActuallyVideo = if (isAtv) {
+            false
+        } else if (isExplicitVideoType) {
+            true
+        } else {
+            mediaMetadata.isVideoSong || (song?.song?.isVideo == true) || ((playbackData?.format?.width ?: 0) > 0)
+        }
+
         database.query {
-            if (song == null) insert(mediaMetadata.copy(duration = duration))
-            else {
+            if (song == null) {
+                insert(
+                    mediaMetadata.copy(
+                        duration = duration,
+                        musicVideoType = if (isActuallyVideo) (playbackData?.videoDetails?.musicVideoType ?: "MUSIC_VIDEO_TYPE_OMV") else MUSIC_VIDEO_TYPE_ATV
+                    )
+                )
+            } else {
                 var updatedSong = song.song
                 if (song.song.duration == -1) {
                     updatedSong = updatedSong.copy(duration = duration)
                 }
-                // Update isVideo flag if it's different from the current value
-                if (song.song.isVideo != mediaMetadata.isVideoSong) {
-                    updatedSong = updatedSong.copy(isVideo = mediaMetadata.isVideoSong)
+                // Update isVideo flag
+                if (song.song.isVideo != isActuallyVideo) {
+                    updatedSong = updatedSong.copy(isVideo = isActuallyVideo)
                 }
                 if (updatedSong != song.song) {
                     update(updatedSong)
                 }
+            }
+        }
+
+        if (currentMediaMetadata.value?.id == mediaId) {
+            val current = currentMediaMetadata.value
+            if (current != null && current.isVideoSong != isActuallyVideo) {
+                currentMediaMetadata.value = current.copy(
+                    musicVideoType = if (isActuallyVideo) (playbackData?.videoDetails?.musicVideoType ?: "MUSIC_VIDEO_TYPE_OMV") else MUSIC_VIDEO_TYPE_ATV
+                )
             }
         }
         if (!database.hasRelatedSongs(mediaId)) {
@@ -2680,7 +2628,7 @@ class MusicService :
         Timber.tag(SERVICE_TAG).d("Performing aggressive cache clear for $mediaId")
 
         // Clear URL cache
-        songUrlCache.remove(mediaId)
+        invalidateSongUrlCache(mediaId)
 
         // Clear player cache
         try {
@@ -2871,7 +2819,7 @@ class MusicService :
         incrementRetryCount(mediaId)
 
         // Clear the cached URL
-        songUrlCache.remove(mediaId)
+        invalidateSongUrlCache(mediaId)
         Timber.tag(SERVICE_TAG).d("Cleared cached URL for $mediaId")
 
         // Clear decryption caches
@@ -2974,6 +2922,7 @@ class MusicService :
                                                 .build()
                                         } ?: response.request
                                     }
+                                    .addInterceptor(com.metrolist.music.utils.YouTubeStreamInterceptor)
                                     .build(),
                             ),
                         ),
@@ -3085,9 +3034,22 @@ class MusicService :
                 return@Factory dataSpec
             }
 
-            // Check if we need to bypass cache for quality or mode change
+            // Check if we need to bypass cache for quality change
             val shouldBypassCache = bypassCacheForQualityChange.contains(mediaId)
-            val isVideoMode = immersiveModeEnabled.value
+            val isYouTubeTrack = !mediaId.startsWith("radio:") && !mediaId.startsWith("local:") && !mediaId.startsWith("content://")
+
+            // Only fetch a muxed video+audio stream if this track is actually a video song.
+            // Album songs use MUSIC_VIDEO_TYPE_ATV and get an audio-only stream.
+            val isVideoSong = if (isYouTubeTrack) {
+                val metaFromMemory = currentMediaMetadata.value?.takeIf { it.id == mediaId }
+                if (metaFromMemory != null) {
+                    metaFromMemory.isVideoSong
+                } else {
+                    runCatching { runBlocking { database.song(mediaId).first()?.song?.isVideo == true } }.getOrDefault(false)
+                }
+            } else false
+
+            val isVideoMode = isVideoSong && immersiveModeEnabled.value
             val cacheKey = if (isVideoMode) "${mediaId}_video" else "${mediaId}_audio"
 
             if (!shouldBypassCache) {
@@ -3102,7 +3064,12 @@ class MusicService :
                     return@Factory dataSpec
                 }
 
-                songUrlCache[cacheKey]?.takeIf { it.second > System.currentTimeMillis() }?.let {
+                val cachedEntry = if (isVideoMode) {
+                    songUrlCache["${mediaId}_video"]
+                } else {
+                    songUrlCache["${mediaId}_audio"] ?: songUrlCache[mediaId]
+                }
+                cachedEntry?.takeIf { it.second > System.currentTimeMillis() }?.let {
                     scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
                     return@Factory dataSpec.withUri(it.first.toUri())
                 }
@@ -3110,52 +3077,28 @@ class MusicService :
                 Timber.tag("MusicService").i("BYPASSING CACHE for $mediaId due to quality/mode change")
             }
 
-            Timber.tag("MusicService").i("FETCHING STREAM: $mediaId | quality=$audioQuality")
-            val playbackData = runBlocking(Dispatchers.IO) {
-                // If we're in video mode, check if there's a specific music video version (setVideoId)
-                // available for this track instead of just the audio version.
-                val videoIdToFetch = if (immersiveModeEnabled.value) {
-                    currentMediaMetadata.value?.setVideoId
-                        ?: database.getSetVideoId(mediaId)?.setVideoId
-                        ?: run {
-                            // FALLBACK: Try to find official video version via YouTube Next API
-                            // This allows us to find the high-quality video version for audio-only tracks.
-                            val nextResult = YouTube.next(com.metrolist.innertube.models.WatchEndpoint(videoId = mediaId)).getOrNull()
-                            val officialVideoId = nextResult?.items?.firstOrNull { it.isVideoSong }?.id
-                            if (officialVideoId != null) {
-                                Timber.tag("MusicService").i("Found official video via YouTube: $officialVideoId for $mediaId")
-                                database.insert(com.metrolist.music.db.entities.SetVideoIdEntity(videoId = mediaId, setVideoId = officialVideoId))
-                                officialVideoId
-                            } else {
-                                mediaId
-                            }
-                        }
-                } else {
-                    mediaId
-                }
-                
-                if (videoIdToFetch != mediaId) {
-                    Timber.tag("MusicService").i("Switching to video-specific ID: $videoIdToFetch (original: $mediaId)")
-                }
-
-                try {
-                    YTPlayerUtils.playerResponseForPlayback(
-                        videoIdToFetch,
-                        audioQuality = audioQuality,
-                        connectivityManager = connectivityManager,
-                        preferVideo = immersiveModeEnabled.value
-                    )
-                } catch (throwable: Throwable) {
-                    if (videoIdToFetch != mediaId) {
-                        Timber.tag("MusicService").w("Failed to fetch stream for video specific ID: $videoIdToFetch. Falling back to original ID: $mediaId. Error: ${throwable.message}")
+            Timber.tag("MusicService").i("FETCHING STREAM: $mediaId | quality=$audioQuality | isVideoMode=$isVideoMode (isVideoSong=$isVideoSong)")
+            val playbackData: YTPlayerUtils.PlaybackData = runCatching {
+                runBlocking(Dispatchers.IO) {
+                    try {
                         YTPlayerUtils.playerResponseForPlayback(
                             mediaId,
                             audioQuality = audioQuality,
                             connectivityManager = connectivityManager,
-                            preferVideo = immersiveModeEnabled.value
-                        )
-                    } else {
-                        throw throwable
+                            preferVideo = isVideoMode
+                        ).getOrThrow()
+                    } catch (throwable: Throwable) {
+                        if (isYouTubeTrack && isVideoMode) {
+                            Timber.tag("MusicService").w("Failed to fetch stream with preferVideo=true. Falling back to pure audio stream for $mediaId. Error: ${throwable.message}")
+                            YTPlayerUtils.playerResponseForPlayback(
+                                mediaId,
+                                audioQuality = audioQuality,
+                                connectivityManager = connectivityManager,
+                                preferVideo = false
+                            ).getOrThrow()
+                        } else {
+                            throw throwable
+                        }
                     }
                 }
             }.getOrElse { throwable ->
@@ -3188,6 +3131,19 @@ class MusicService :
 
             val nonNullPlayback = requireNotNull(playbackData) {
                 getString(R.string.error_unknown)
+            }
+
+            // Immediately notify if this track has a video stream so UI updates without waiting for DB
+            val streamHasVideo = (nonNullPlayback.format.width ?: 0) > 0
+            val isAtvType = nonNullPlayback.videoDetails?.musicVideoType == MUSIC_VIDEO_TYPE_ATV
+            val isVideoType = nonNullPlayback.videoDetails?.musicVideoType != null && !isAtvType
+            val isTrackVideo = !isAtvType && (isVideoType || (streamHasVideo && isVideoSong))
+            if (currentMediaMetadata.value?.id == mediaId) {
+                val current = currentMediaMetadata.value
+                val newVideoType = if (isTrackVideo) (nonNullPlayback.videoDetails?.musicVideoType ?: "MUSIC_VIDEO_TYPE_OMV") else MUSIC_VIDEO_TYPE_ATV
+                if (current != null && current.musicVideoType != newVideoType) {
+                    currentMediaMetadata.value = current.copy(musicVideoType = newVideoType)
+                }
             }
 
             run {
@@ -3226,11 +3182,15 @@ class MusicService :
 
                 val streamUrl = nonNullPlayback.streamUrl
 
-                songUrlCache[cacheKey] =
-                    streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
+                val cacheEntry = streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
+                if (isVideoMode) {
+                    songUrlCache["${mediaId}_video"] = cacheEntry
+                } else {
+                    songUrlCache["${mediaId}_audio"] = cacheEntry
+                    songUrlCache[mediaId] = cacheEntry
+                }
                 
-                val newSpec = dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
-                return@Factory newSpec
+                return@Factory dataSpec.withUri(streamUrl.toUri())
             }
         }
     }
@@ -3547,28 +3507,47 @@ class MusicService :
         }
     }
 
-    private var localMediaServer: com.metrolist.music.cast.LocalMediaServer? = null
+    var localMediaServer: com.metrolist.music.cast.LocalMediaServer? = null
+        private set
 
     /**
-     * Initialize Google Cast support
+     * Initialize Google Cast and DLNA Smart TV support
      */
     private fun initializeCast() {
         if (dataStore.get(com.metrolist.music.constants.EnableGoogleCastKey, true)) {
             try {
-                // Initialize the local media server for casting local files
+                // Initialize the local media server for casting local files and proxying streams to TVs
                 localMediaServer = com.metrolist.music.cast.LocalMediaServer(
                     context = this,
                     playerCache = playerCache,
-                    downloadCache = downloadCache
+                    downloadCache = downloadCache,
+                    streamUrlResolver = { mediaId -> getStreamUrl(mediaId) },
+                    lyricsResolver = { mediaId ->
+                        try {
+                            val cached = database.lyrics(mediaId).first()?.lyrics
+                            if (!cached.isNullOrEmpty()) {
+                                cached
+                            } else {
+                                val meta = currentMediaMetadata.value
+                                if (meta != null && meta.id == mediaId) {
+                                    lyricsHelper.getLyrics(meta).lyrics
+                                } else {
+                                    null
+                                }
+                            }
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
                 )
                 localMediaServer?.start()
-                timber.log.Timber.d("LocalMediaServer started for Cast")
+                timber.log.Timber.d("LocalMediaServer started for Cast/DLNA")
 
                 castConnectionHandler = CastConnectionHandler(this, scope, this)
                 castConnectionHandler?.initialize()
-                timber.log.Timber.d("Google Cast initialized")
+                timber.log.Timber.d("Cast/DLNA initialized")
             } catch (e: Exception) {
-                timber.log.Timber.e(e, "Failed to initialize Google Cast")
+                timber.log.Timber.e(e, "Failed to initialize Cast/DLNA")
             }
         }
     }

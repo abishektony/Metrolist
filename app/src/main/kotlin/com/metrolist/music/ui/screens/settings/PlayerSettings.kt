@@ -899,6 +899,27 @@ fun PlayerSettings(
                         )
                     },
                     onClick = { onKeepScreenOnChange(!keepScreenOn) }
+                ),
+                Material3SettingsItem(
+                    icon = painterResource(R.drawable.cast),
+                    title = { Text(stringResource(R.string.google_cast)) },
+                    description = { Text("Cast to Smart TVs, Chromecast, and DLNA devices (Samsung, LG, Roku, Windows)") },
+                    trailingContent = {
+                        Switch(
+                            checked = enableGoogleCast,
+                            onCheckedChange = onEnableGoogleCastChange,
+                            thumbContent = {
+                                Icon(
+                                    painter = painterResource(
+                                        id = if (enableGoogleCast) R.drawable.check else R.drawable.close
+                                    ),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(SwitchDefaults.IconSize)
+                                )
+                            }
+                        )
+                    },
+                    onClick = { onEnableGoogleCastChange(!enableGoogleCast) }
                 )
             )
         )

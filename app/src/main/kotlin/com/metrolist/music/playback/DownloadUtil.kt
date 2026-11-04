@@ -80,6 +80,7 @@ constructor(
                                         .build()
                                 } ?: response.request
                             }
+                            .addInterceptor(com.metrolist.music.utils.YouTubeStreamInterceptor)
                             .build(),
                     ),
                 ),

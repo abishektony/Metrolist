@@ -1,0 +1,7 @@
+- Redesigned Galaxy Z Flip cover screen (Flex Window) player inspired by Samsung One UI 6 & 7 with ambient blurred artwork background, elevated hero media card, and large circular thumb-friendly controls.
+- Optimized cover screen layout symmetrically across all device orientations and flex fold angles.
+- Enabled automatic Video mode playback for video songs, with one-tap seamless switching between video and album art photo without re-buffering.
+- Automatically hide the Video tab on audio-only music and bring it back when a video song is next.
+- Fixed stream playback for non-video music (e.g. "Recollect") by directly fetching high-quality audio streams without video preference constraints.
+- Added automatic fallback to pure audio streaming if video format resolution fails.
+- Added DLNA / UPnP Smart TV casting support with local stream proxying and synchronized TV lyrics.

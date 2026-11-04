@@ -77,6 +77,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -627,6 +628,8 @@ fun Lyrics(
         selectedIndices.clear()
     }
 
+    val currentSliderPositionProvider by rememberUpdatedState(sliderPositionProvider)
+
     LaunchedEffect(lyrics) {
         if (lyrics.isNullOrEmpty() || !lyrics.startsWith("[")) {
             currentLineIndex = -1
@@ -634,7 +637,7 @@ fun Lyrics(
         }
         while (isActive) {
             delay(8) // Faster update for word-by-word animation
-            val sliderPosition = sliderPositionProvider()
+            val sliderPosition = currentSliderPositionProvider()
             isSeeking = sliderPosition != null
             val position = sliderPosition ?: playerConnection.player.currentPosition
             currentPlaybackPosition = position

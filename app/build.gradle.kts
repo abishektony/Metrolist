@@ -33,8 +33,8 @@ android {
         applicationId = applicationIdOverride ?: baseApplicationId
         minSdk = 26
         targetSdk = 36
-        versionCode = 146
-        versionName = "13.4.2"
+        versionCode = 147
+        versionName = "13.4.3"
         resValue("string", "app_name", appNameOverride ?: "abi music")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

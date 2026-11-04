@@ -121,16 +121,12 @@ private fun calculateThumbnailDimensions(
     cornerRadius: Dp = ThumbnailCornerRadius,
     isLandscape: Boolean = false
 ): ThumbnailDimensions {
-    // In landscape, use height as the constraining dimension for a square thumbnail
-    val effectiveSize = if (isLandscape) {
-        minOf(containerWidth, containerHeight) - (horizontalPadding * 2)
-    } else {
-        containerWidth - (horizontalPadding * 2)
-    }
+    // In landscape or short screens, use the smaller dimension to ensure square thumbnail fits
+    val effectiveSize = minOf(containerWidth, containerHeight) - (horizontalPadding * 2)
     return ThumbnailDimensions(
         itemWidth = containerWidth,
         containerSize = containerWidth,
-        thumbnailSize = effectiveSize,
+        thumbnailSize = maxOf(0.dp, effectiveSize),
         cornerRadius = cornerRadius * 2
     )
 }
@@ -232,6 +228,19 @@ fun Thumbnail(
     // Pre-calculate text color based on background style
     val textBackgroundColor = getTextColor(playerBackground)
     
+    val hasVideoTrack by playerConnection.hasVideoTrack.collectAsState()
+    val currentSong by playerConnection.currentSong.collectAsState(initial = null)
+    
+    val hasVideoAvailable = remember(mediaMetadata, currentSong, hasVideoTrack) {
+        val meta = mediaMetadata
+        meta != null &&
+            !meta.id.startsWith("radio:") &&
+            !meta.id.startsWith("local:") &&
+            !meta.id.startsWith("content://") &&
+            meta.musicVideoType != com.metrolist.innertube.models.WatchEndpoint.WatchEndpointMusicSupportedConfigs.WatchEndpointMusicConfig.Companion.MUSIC_VIDEO_TYPE_ATV &&
+            (hasVideoTrack || meta.isVideoSong || (currentSong?.song?.isVideo == true && currentSong?.song?.title == meta.title))
+    }
+
     // Grid state
     val thumbnailLazyGridState = rememberLazyGridState()
     
@@ -328,17 +337,19 @@ fun Thumbnail(
             visible = error == null,
             enter = fadeIn(),
             exit = fadeOut(),
-            modifier = Modifier
-                .fillMaxSize()
-                .then(if (!isLandscape) Modifier.statusBarsPadding() else Modifier),
+            modifier = Modifier.fillMaxSize(),
         ) {
+            val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+            val isCoverScreen = configuration.screenHeightDp < 520
             Column(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (!isLandscape && !isCoverScreen) Modifier.statusBarsPadding() else Modifier),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = if (isLandscape) Arrangement.Center else Arrangement.Top
             ) {
-                // Now Playing header - hide in landscape mode
-                if (!isLandscape) {
+                // Now Playing header - hide in landscape mode or cover screen
+                if (!isLandscape && !isCoverScreen) {
                     ThumbnailHeader(
                         queueTitle = queueTitle,
                         albumTitle = mediaMetadata?.album?.title,
@@ -355,11 +366,12 @@ fun Thumbnail(
                         Modifier.fillMaxSize()
                     }
                 ) {
-                    // Calculate dimensions once per size change, considering landscape mode
-                    val dimensions = remember(maxWidth, maxHeight, isLandscape) {
+                    // Calculate dimensions once per size change, considering landscape mode and cover screen
+                    val dimensions = remember(maxWidth, maxHeight, isLandscape, isCoverScreen) {
                         calculateThumbnailDimensions(
                             containerWidth = maxWidth,
                             containerHeight = maxHeight,
+                            horizontalPadding = if (isCoverScreen) 8.dp else PlayerHorizontalPadding,
                             isLandscape = isLandscape
                         )
                     }
@@ -408,6 +420,7 @@ fun Thumbnail(
                                 isListenTogetherGuest = isListenTogetherGuest,
                                 currentMediaId = mediaMetadata?.id,
                                 currentMediaThumbnail = mediaMetadata?.thumbnailUrl,
+                                hasVideo = hasVideoAvailable,
                                 playerMode = playerMode,
                                 onPlayerModeChange = onPlayerModeChange,
                                 onToggleFullScreen = onToggleFullScreen,
@@ -509,6 +522,7 @@ private fun ThumbnailItem(
     isListenTogetherGuest: Boolean = false,
     currentMediaId: String? = null,
     currentMediaThumbnail: String? = null,
+    hasVideo: Boolean = false,
     playerMode: PlayerMode = PlayerMode.SONG,
     onPlayerModeChange: (PlayerMode) -> Unit = {},
     onToggleFullScreen: () -> Unit = {},
@@ -520,18 +534,21 @@ private fun ThumbnailItem(
     var skipMultiplier by remember { mutableIntStateOf(1) }
     var lastTapTime by remember { mutableLongStateOf(0L) }
 
+    val isCoverScreen = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp < 520
+    val hPadding = if (isCoverScreen) 8.dp else PlayerHorizontalPadding
+
     Box(
         modifier = modifier
             .then(
                 if (isLandscape) {
-                    Modifier.size(dimensions.thumbnailSize + (PlayerHorizontalPadding * 2))
+                    Modifier.size(dimensions.thumbnailSize + (hPadding * 2))
                 } else {
                     Modifier
                         .width(dimensions.itemWidth)
                         .fillMaxSize()
                 }
             )
-            .padding(horizontal = PlayerHorizontalPadding)
+            .padding(horizontal = hPadding)
             .graphicsLayer {
                 // Render entire thumbnail item on separate hardware layer for smooth animations
                 compositingStrategy = CompositingStrategy.Offscreen
@@ -567,18 +584,9 @@ private fun ThumbnailItem(
                     },
                     onTap = {
                         if (isListenTogetherGuest) return@detectTapGestures
-                        val hasVideo = !item.mediaId.startsWith("radio:") && item.mediaId.isNotBlank()
-                        
-                        // Simple cycle: SONG -> VIDEO (if has video) -> FULLSCREEN -> SONG
-                        when (playerMode) {
-                            PlayerMode.SONG -> {
-                                if (hasVideo) {
-                                    onPlayerModeChange(PlayerMode.VIDEO)
-                                }
-                            }
-                            PlayerMode.VIDEO -> {
-                                onToggleFullScreen()
-                            }
+                        if (hasVideo && item.mediaId == currentMediaId) {
+                            val next = if (playerMode == PlayerMode.VIDEO) PlayerMode.SONG else PlayerMode.VIDEO
+                            onPlayerModeChange(next)
                         }
                     }
                 )
@@ -592,24 +600,6 @@ private fun ThumbnailItem(
         ) {
             if (hidePlayerThumbnail) {
                 HiddenThumbnailPlaceholder(textBackgroundColor = textBackgroundColor)
-            } else if (playerMode == PlayerMode.VIDEO && item.mediaId == currentMediaId && !isFullScreen) {
-                androidx.compose.ui.viewinterop.AndroidView(
-                    factory = { ctx ->
-                        androidx.media3.ui.PlayerView(android.view.ContextThemeWrapper(ctx, R.style.PlayerViewTexture)).apply {
-                            useController = false
-                            this.player = player
-                            resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                            setBackgroundColor(android.graphics.Color.BLACK)
-                        }
-                    },
-                    update = { view ->
-                        view.player = player
-                    },
-                    onRelease = { view ->
-                        view.player = null
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
             } else {
                 val artworkUriToUse = if (item.mediaId == currentMediaId && !currentMediaThumbnail.isNullOrBlank()) {
                     currentMediaThumbnail
